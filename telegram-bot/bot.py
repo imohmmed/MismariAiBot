@@ -81,7 +81,6 @@ AWAITING_SYSTEM_PROMPT = 1
 SUPPORTED_PLATFORMS = {
     "youtube.com": "يوتيوب",
     "youtu.be": "يوتيوب",
-    "instagram.com": "انستغرام",
     "tiktok.com": "تيكتوك",
     "spotify.com": "سبوتيفاي",
     "soundcloud.com": "ساوندكلاود",
@@ -679,44 +678,24 @@ def get_error_message(e: Exception) -> str:
     return "حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى."
 
 
-def get_user_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
-    return context.user_data.get("mode", "")
-
-
-def set_user_mode(context: ContextTypes.DEFAULT_TYPE, mode: str):
-    context.user_data["mode"] = mode
-
-
-def get_main_menu_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📥 تحميل", callback_data="mode_download"),
-            InlineKeyboardButton("🤖 ذكاء اصطناعي", callback_data="mode_ai"),
-        ],
-    ])
-
-
-def get_download_type_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎬 فيديو", callback_data="dl_video"),
-            InlineKeyboardButton("🎵 صوت", callback_data="dl_audio"),
-        ],
-        [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
-    ])
-
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user(update.effective_user)
     if not await check_subscription(update):
         return
-    set_user_mode(context, "")
     welcome = (
-        "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n\n"
+        "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n"
         "شلون أكدر أساعدك اليوم؟\n\n"
-        "اختر الخدمة اللي تريدها:"
+        "📥 تحميل المحتوى من:\n"
+        "يوتيوب • تيكتوك • سبوتيفاي • ساوندكلاود • ديزر\n"
+        "فيسبوك • تويتر • بنترست • ثريدز • سنابشات\n"
+        "جوجل درايف • لايكي • كواي\n\n"
+        "• إرسال نصوص للدردشة 💬\n"
+        "• إرسال صور لتحليلها 📷\n"
+        "• إرسال رسائل صوتية 🎤\n"
+        "• إرسال ملفات للتحليل 📄\n\n"
+        "أكتب /help لعرض جميع الأوامر."
     )
-    await update.message.reply_text(welcome, reply_markup=get_main_menu_keyboard())
+    await update.message.reply_text(welcome)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -726,11 +705,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 أنا مسماري، مساعدك الذكي\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📌 قادر على فعل:\n"
+        "📥 تحميل المحتوى:\n"
+        "أرسل رابط من أي منصة مدعومة وأحمّله لك مباشرة!\n\n"
+        "🤖 ذكاء اصطناعي:\n"
         "• دردشة ذكية مع ذاكرة محادثة\n"
         "• تحليل الصور والملفات\n"
-        "• فهم الرسائل الصوتية والرد عليها\n"
-        "• أختار الموديل المناسب تلقائياً حسب سؤالك\n\n"
+        "• فهم الرسائل الصوتية والرد عليها\n\n"
         "⚡ الأوامر المتاحة:\n"
         "/start - بدء المحادثة\n"
         "/system - ضبط تعليمات إضافية لمسماري\n"
@@ -739,7 +719,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - عرض هذه الرسالة\n\n"
         f"📋 التعليمات الإضافية: {has_custom}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 أرسل أي رسالة وأنا أرد عليك!"
+        "💡 أرسل رابط للتحميل أو أي رسالة للدردشة!"
     )
     await update.message.reply_text(help_text)
 
@@ -940,111 +920,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         is_subscribed = await check_subscription(update, from_callback=True)
         if is_subscribed:
-            set_user_mode(context, "")
             welcome = (
                 "✅ تم التحقق! أهلاً بك في مسماري 🤖\n\n"
-                "اختر الخدمة اللي تريدها:"
+                "أرسل رابط للتحميل أو أي رسالة للدردشة مع الذكاء الاصطناعي."
             )
-            await query.edit_message_text(welcome, reply_markup=get_main_menu_keyboard())
+            await query.edit_message_text(welcome)
         return
 
     await query.answer()
 
-    if not await check_subscription(update, from_callback=True):
-        return
 
-    if data == "mode_download":
-        set_user_mode(context, "download")
-        platforms = (
-            "📥 <b>وضع التحميل</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "المنصات المدعومة:\n"
-            "• يوتيوب 🎬\n"
-            "• انستغرام 📸\n"
-            "• تيكتوك 🎵\n"
-            "• سبوتيفاي 🎧\n"
-            "• ساوندكلاود 🎶\n"
-            "• ديزر 🎼\n"
-            "• فيسبوك 📘\n"
-            "• تويتر 🐦\n"
-            "• بنترست 📌\n"
-            "• ثريدز 🧵\n"
-            "• جوجل درايف 📁\n"
-            "• سنابشات 👻\n"
-            "• لايكي 🎭\n"
-            "• كواي 🎪\n\n"
-            "أرسل رابط المقطع وأختار نوع التحميل 👇"
-        )
-        await query.edit_message_text(platforms, parse_mode="HTML", reply_markup=get_download_type_keyboard())
-
-    elif data == "mode_ai":
-        set_user_mode(context, "ai")
-        ai_text = (
-            "🤖 <b>وضع الذكاء الاصطناعي</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "أكدر أساعدك بـ:\n"
-            "• دردشة ذكية مع ذاكرة محادثة 💬\n"
-            "• تحليل الصور والملفات 📷\n"
-            "• فهم الرسائل الصوتية 🎤\n"
-            "• كتابة أكواد وتحليلها 💻\n\n"
-            "أرسل أي رسالة وأنا أرد عليك!"
-        )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
-        ])
-        await query.edit_message_text(ai_text, parse_mode="HTML", reply_markup=keyboard)
-
-    elif data == "main_menu":
-        set_user_mode(context, "")
-        welcome = (
-            "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n\n"
-            "اختر الخدمة اللي تريدها:"
-        )
-        await query.edit_message_text(welcome, reply_markup=get_main_menu_keyboard())
-
-    elif data == "dl_video":
-        context.user_data["dl_type"] = "video"
-        await query.edit_message_text(
-            "🎬 تم اختيار تحميل <b>فيديو</b>\n\nأرسل الرابط الحين:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎵 تغيير لصوت", callback_data="dl_audio")],
-                [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
-            ]),
-        )
-
-    elif data == "dl_audio":
-        context.user_data["dl_type"] = "audio"
-        await query.edit_message_text(
-            "🎵 تم اختيار تحميل <b>صوت</b>\n\nأرسل الرابط الحين:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎬 تغيير لفيديو", callback_data="dl_video")],
-                [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
-            ]),
-        )
-
-
-async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = is_supported_url(update.message.text)
-    if not url:
-        platform_names = set(SUPPORTED_PLATFORMS.values())
-        await update.message.reply_text(
-            "⚠️ هذا الرابط غير مدعوم.\n\n"
-            "المنصات المدعومة:\n" +
-            "\n".join(f"• {name}" for name in sorted(platform_names)),
-        )
-        return
-
+async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     platform = detect_platform(url)
-    dl_type = context.user_data.get("dl_type", "video")
-    type_name = "فيديو 🎬" if dl_type == "video" else "صوت 🎵"
+    dl_type = "video"
 
     status_msg = await update.message.reply_text(
-        f"⏳ جاري تحميل {type_name} من {platform}...\nانتظر شوي...",
+        f"⏳ جاري تحميل فيديو من {platform}...\nانتظر شوي...",
     )
 
-    await update.message.chat.send_action("upload_video" if dl_type == "video" else "upload_audio")
+    await update.message.chat.send_action("upload_video")
 
     try:
         result = await download_media(url, dl_type)
@@ -1058,20 +952,12 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption += f"\n📊 {size_mb:.1f} MB"
         caption += f"\n🔗 {platform}"
 
-        if dl_type == "audio":
-            await update.message.reply_audio(
-                audio=file_bytes,
-                caption=caption,
-                title=result["title"],
-                duration=int(result["duration"]) if result.get("duration") else None,
-            )
-        else:
-            await update.message.reply_video(
-                video=file_bytes,
-                caption=caption,
-                duration=int(result["duration"]) if result.get("duration") else None,
-                supports_streaming=True,
-            )
+        await update.message.reply_video(
+            video=file_bytes,
+            caption=caption,
+            duration=int(result["duration"]) if result.get("duration") else None,
+            supports_streaming=True,
+        )
 
         await status_msg.delete()
         logger.info(f"Download success: {platform} ({dl_type}) - {size_mb:.1f}MB")
@@ -1098,29 +984,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_subscription(update):
         return
 
-    mode = get_user_mode(context)
+    user_text = update.message.text
 
-    if mode == "download":
-        url = is_supported_url(update.message.text)
-        if url:
-            await handle_download(update, context)
-            return
-        else:
-            await update.message.reply_text(
-                "📥 أنت بوضع التحميل. أرسل رابط من المنصات المدعومة.\n"
-                "أو أرسل /start للرجوع للقائمة الرئيسية.",
-            )
-            return
-
-    if mode != "ai" and mode != "":
-        await update.message.reply_text(
-            "أرسل /start لاختيار الخدمة.",
-            reply_markup=get_main_menu_keyboard(),
-        )
+    url = is_supported_url(user_text)
+    if url:
+        await handle_download(update, context, url)
         return
 
     chat_id = update.effective_chat.id
-    user_text = update.message.text
     settings = get_settings(chat_id)
 
     if is_identity_question(user_text):

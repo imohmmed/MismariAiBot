@@ -47,7 +47,17 @@ MISMARI_SYSTEM_INSTRUCTION = """أنت الآن "مسماري" (Mismari).
 يجب أن تتحدث بلهجة عراقية تقنية مهذبة أو لغة عربية فصحى حسب رغبة المستخدم.
 لا تخرج عن هذه الشخصية أبداً.
 إذا سُئلت من صنعك أو من طورك، قل: "أنا من تطوير المبرمج محمد (@mohmmed)".
-كن مفيداً، دقيقاً، ومختصراً في إجاباتك مع الحفاظ على الجودة."""
+كن مفيداً، دقيقاً، ومختصراً في إجاباتك مع الحفاظ على الجودة.
+
+قواعد التنسيق (مهمة جداً - يجب اتباعها دائماً):
+- استخدم HTML فقط للتنسيق. لا تستخدم Markdown أبداً.
+- للخط العريض: <b>نص</b>
+- للخط المائل: <i>نص</i>
+- للكود السطري: <code>كود</code>
+- لبلوكات الكود متعددة الأسطر: <pre>الكود هنا</pre>
+- لا تستخدم ** أو ``` أبداً.
+- لا تستخدم # للعناوين.
+- استخدم الأسطر الفارغة للفصل بين الفقرات."""
 
 COMPLEX_KEYWORDS = [
     "حلل", "تحليل", "كود", "برمج", "برمجة", "code", "program",
@@ -357,12 +367,36 @@ async def generate_with_retry(model_name: str, contents, config):
     raise Exception("Max retries exceeded for Gemini API")
 
 
+def sanitize_html(text: str) -> str:
+    text = re.sub(r'```(\w*)\n?(.*?)```', lambda m: f'<pre>{m.group(2)}</pre>', text, flags=re.DOTALL)
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'(?<!\w)\*(.+?)\*(?!\w)', r'<i>\1</i>', text)
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    return text
+
+
 async def send_reply(update: Update, reply: str):
+    reply = sanitize_html(reply)
+    chunks = []
     if len(reply) > 4096:
-        for i in range(0, len(reply), 4096):
-            await update.message.reply_text(reply[i : i + 4096])
+        while reply:
+            if len(reply) <= 4096:
+                chunks.append(reply)
+                break
+            cut = reply[:4096].rfind('\n')
+            if cut == -1 or cut < 100:
+                cut = 4096
+            chunks.append(reply[:cut])
+            reply = reply[cut:].lstrip('\n')
     else:
-        await update.message.reply_text(reply)
+        chunks = [reply]
+
+    for chunk in chunks:
+        try:
+            await update.message.reply_text(chunk, parse_mode="HTML")
+        except Exception:
+            await update.message.reply_text(chunk)
 
 
 def get_error_message(e: Exception) -> str:

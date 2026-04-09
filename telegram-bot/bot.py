@@ -393,8 +393,8 @@ async def check_subscription(update: Update, from_callback: bool = False) -> boo
 
     channel_name = REQUIRED_CHANNEL.lstrip('@')
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 اشترك بالقناة", url=f"https://t.me/{channel_name}")],
-        [InlineKeyboardButton("✅ تحققت، اشتركت", callback_data="check_sub")],
+        [InlineKeyboardButton("اشترك بالقناة", url=f"https://t.me/{channel_name}", api_kwargs={"style": "primary"})],
+        [InlineKeyboardButton("تحققت، اشتركت", callback_data="check_sub", api_kwargs={"style": "success"})],
     ])
     sub_text = (
         "⚠️ يجب عليك الاشتراك في القناة أولاً للاستخدام.\n\n"
@@ -683,19 +683,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_subscription(update):
         return
     welcome = (
-        "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n"
+        'أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية <tg-emoji emoji-id="5287684458881756303">🤖</tg-emoji>\n'
         "شلون أكدر أساعدك اليوم؟\n\n"
-        "📥 تحميل المحتوى من:\n"
+        '<tg-emoji emoji-id="5258514780469075716">📥</tg-emoji> تحميل المحتوى من:\n'
         "يوتيوب • تيكتوك • سبوتيفاي • ساوندكلاود • ديزر\n"
         "فيسبوك • تويتر • بنترست • ثريدز • سنابشات\n"
         "جوجل درايف • لايكي • كواي\n\n"
-        "• إرسال نصوص للدردشة 💬\n"
-        "• إرسال صور لتحليلها 📷\n"
-        "• إرسال رسائل صوتية 🎤\n"
-        "• إرسال ملفات للتحليل 📄\n\n"
+        '• إرسال نصوص للدردشة <tg-emoji emoji-id="5891243564309942507">💬</tg-emoji>\n'
+        '• إرسال صور لتحليلها <tg-emoji emoji-id="5775949822993371030">📷</tg-emoji>\n'
+        '• إرسال رسائل صوتية <tg-emoji emoji-id="5897554554894946515">🎤</tg-emoji>\n'
+        '• إرسال ملفات للتحليل <tg-emoji emoji-id="5877332341331857066">📄</tg-emoji>\n\n'
         "أكتب /help لعرض جميع الأوامر."
     )
-    await update.message.reply_text(welcome)
+    await update.message.reply_text(welcome, parse_mode="HTML")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

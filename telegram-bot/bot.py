@@ -847,18 +847,23 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mime_type = doc.mime_type or "application/octet-stream"
         file_name = doc.file_name or "unknown"
 
-        text_mimes = [
+        GEMINI_SUPPORTED_MIMES = [
             "text/", "application/json", "application/xml",
             "application/javascript", "application/typescript",
             "application/x-python", "application/x-sh",
+            "application/pdf",
+            "image/png", "image/jpeg", "image/webp", "image/gif",
+            "audio/mp3", "audio/wav", "audio/mpeg", "audio/ogg",
+            "video/mp4", "video/webm", "video/mpeg",
         ]
-        is_text = any(mime_type.startswith(m) for m in text_mimes)
+        is_gemini_supported = any(mime_type.startswith(m) for m in GEMINI_SUPPORTED_MIMES)
 
         text_extensions = [
             ".py", ".js", ".ts", ".html", ".css", ".json", ".xml",
             ".yaml", ".yml", ".md", ".txt", ".csv", ".sh", ".sql",
             ".env", ".ini", ".cfg", ".toml", ".rs", ".go", ".java",
             ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".swift",
+            ".kt", ".dart", ".lua", ".r", ".m", ".pl", ".log",
         ]
         is_text_ext = any(file_name.lower().endswith(ext) for ext in text_extensions)
 
@@ -867,26 +872,43 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history = get_history(chat_id, MAX_HISTORY - 1)
         contents = build_contents(history[:-1], settings["summary"])
 
-        if is_text or is_text_ext:
+        sent_as_text = False
+        if is_text_ext or not is_gemini_supported:
             try:
                 file_content = doc_bytes.decode("utf-8")
                 prompt = (
                     f"اسم الملف: {file_name}\n"
-                    f"نوع الملف: {mime_type}\n\n"
-                    f"محتوى الملف:\n```\n{file_content[:50000]}\n```\n\n{caption}"
+                    f"نوع الملف: {mime_type}\n"
+                    f"حجم الملف: {len(doc_bytes) // 1024} KB\n\n"
+                    f"محتوى الملف:\n<pre>\n{file_content[:50000]}\n</pre>\n\n{caption}"
                 )
                 contents.append(types.Content(
                     role="user",
                     parts=[types.Part.from_text(text=prompt)]
                 ))
+                sent_as_text = True
             except UnicodeDecodeError:
+                pass
+
+        if not sent_as_text:
+            if is_gemini_supported:
                 file_part = types.Part.from_bytes(data=bytes(doc_bytes), mime_type=mime_type)
                 text_part = types.Part.from_text(text=f"اسم الملف: {file_name}\n{caption}")
                 contents.append(types.Content(role="user", parts=[file_part, text_part]))
-        else:
-            file_part = types.Part.from_bytes(data=bytes(doc_bytes), mime_type=mime_type)
-            text_part = types.Part.from_text(text=f"اسم الملف: {file_name}\n{caption}")
-            contents.append(types.Content(role="user", parts=[file_part, text_part]))
+            else:
+                file_size = len(doc_bytes) // 1024
+                prompt = (
+                    f"المستخدم أرسل ملف اسمه: {file_name}\n"
+                    f"نوع الملف: {mime_type}\n"
+                    f"حجم الملف: {file_size} KB\n\n"
+                    f"هذا الملف من نوع غير مدعوم للقراءة المباشرة. "
+                    f"أخبر المستخدم بنوع الملف وأنك لا تستطيع قراءة محتواه مباشرة، "
+                    f"لكن قدّم له معلومات مفيدة عن هذا النوع من الملفات إذا أمكن.\n\n{caption}"
+                )
+                contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt)]
+                ))
 
         model_name = MODEL_SMART
         config = make_config(get_full_system_instruction(settings["system_prompt"]))

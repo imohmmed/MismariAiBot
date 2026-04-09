@@ -6,5 +6,6 @@ requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.5",
     "google-genai>=1.71.0",
+    "google-generativeai>=0.8.6",
     "python-telegram-bot>=22.7",
 ]

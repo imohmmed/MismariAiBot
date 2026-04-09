@@ -1,13 +1,11 @@
 import os
 import sqlite3
 import logging
-import json
-import base64
-import io
 import asyncio
 import re
 from datetime import datetime
 
+import google.generativeai as genai
 from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
@@ -16,8 +14,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from google import genai
-from google.genai import types
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -29,39 +25,24 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-MODEL_FLASH = "gemini-2.0-flash"
-MODEL_PRO = "gemini-2.5-pro"
+MODEL_FLASH = "gemini-1.5-flash"
+MODEL_PRO = "gemini-1.5-pro"
+MAX_RETRIES = 3
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "conversations.db")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-MAX_RETRIES = 3
+genai.configure(api_key=GEMINI_API_KEY)
 
 
-async def generate_with_retry(model_name, contents, config=None):
-    if config is None:
-        config = types.GenerateContentConfig(max_output_tokens=8192)
-
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=config,
-            )
-            return response
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                wait_match = re.search(r"retry in ([\d.]+)s", error_str, re.IGNORECASE)
-                wait_time = float(wait_match.group(1)) if wait_match else (15 * (attempt + 1))
-                wait_time = min(wait_time, 60)
-                logger.warning(f"Rate limited, waiting {wait_time}s (attempt {attempt + 1}/{MAX_RETRIES})")
-                await asyncio.sleep(wait_time)
-            else:
-                raise
-    raise Exception("Max retries exceeded for Gemini API")
+def get_model(model_name: str, system_prompt: str = ""):
+    config = genai.GenerationConfig(max_output_tokens=8192)
+    if system_prompt:
+        return genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=config,
+            system_instruction=system_prompt,
+        )
+    return genai.GenerativeModel(model_name=model_name, generation_config=config)
 
 
 def init_db():
@@ -156,25 +137,57 @@ def get_model_name(settings: dict) -> str:
     return MODEL_PRO if settings["model"] == "pro" else MODEL_FLASH
 
 
-def build_contents(history: list[dict], system_prompt: str = "") -> list[types.Content]:
-    contents = []
-    if system_prompt:
-        contents.append(types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=f"[System Instructions]: {system_prompt}")]
-        ))
-        contents.append(types.Content(
-            role="model",
-            parts=[types.Part.from_text(text="Understood. I will follow these instructions.")]
-        ))
-
-    for msg in history:
+def build_chat_history(history: list[dict]) -> list[dict]:
+    chat_history = []
+    for msg in history[:-1]:
         role = "model" if msg["role"] == "assistant" else "user"
-        contents.append(types.Content(
-            role=role,
-            parts=[types.Part.from_text(text=msg["content"])]
-        ))
-    return contents
+        chat_history.append({"role": role, "parts": [msg["content"]]})
+    return chat_history
+
+
+async def generate_with_retry(model, chat_history, message_parts):
+    for attempt in range(MAX_RETRIES):
+        try:
+            chat = model.start_chat(history=chat_history)
+            response = chat.send_message(message_parts)
+            return response.text
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
+                wait_match = re.search(r"retry.+?([\d.]+)\s*s", error_str, re.IGNORECASE)
+                wait_time = float(wait_match.group(1)) if wait_match else (20 * (attempt + 1))
+                wait_time = min(wait_time, 60)
+                logger.warning(f"Rate limited, waiting {wait_time:.0f}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                await asyncio.sleep(wait_time)
+            else:
+                raise
+    raise Exception("Max retries exceeded for Gemini API")
+
+
+async def generate_content_with_retry(model, parts):
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = model.generate_content(parts)
+            return response.text
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
+                wait_match = re.search(r"retry.+?([\d.]+)\s*s", error_str, re.IGNORECASE)
+                wait_time = float(wait_match.group(1)) if wait_match else (20 * (attempt + 1))
+                wait_time = min(wait_time, 60)
+                logger.warning(f"Rate limited, waiting {wait_time:.0f}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                await asyncio.sleep(wait_time)
+            else:
+                raise
+    raise Exception("Max retries exceeded for Gemini API")
+
+
+async def send_reply(update: Update, reply: str):
+    if len(reply) > 4096:
+        for i in range(0, len(reply), 4096):
+            await update.message.reply_text(reply[i : i + 4096])
+    else:
+        await update.message.reply_text(reply)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -242,9 +255,13 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if context.args:
-        prompt = " ".join(context.args)
-        update_setting(chat_id, "system_prompt", prompt)
-        await update.message.reply_text(f"تم تعيين تعليمات النظام:\n{prompt}")
+        prompt_text = " ".join(context.args)
+        if prompt_text.lower() == "reset":
+            update_setting(chat_id, "system_prompt", "")
+            await update.message.reply_text("تم مسح تعليمات النظام.")
+        else:
+            update_setting(chat_id, "system_prompt", prompt_text)
+            await update.message.reply_text(f"تم تعيين تعليمات النظام:\n{prompt_text}")
     else:
         settings = get_settings(chat_id)
         if settings["system_prompt"]:
@@ -266,20 +283,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM messages WHERE chat_id = ?", (chat_id,))
     total = c.fetchone()[0]
-    c.execute(
-        "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND role = 'user'",
-        (chat_id,),
-    )
+    c.execute("SELECT COUNT(*) FROM messages WHERE chat_id = ? AND role = 'user'", (chat_id,))
     user_msgs = c.fetchone()[0]
-    c.execute(
-        "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND role = 'assistant'",
-        (chat_id,),
-    )
+    c.execute("SELECT COUNT(*) FROM messages WHERE chat_id = ? AND role = 'assistant'", (chat_id,))
     bot_msgs = c.fetchone()[0]
-    c.execute(
-        "SELECT MIN(timestamp), MAX(timestamp) FROM messages WHERE chat_id = ?",
-        (chat_id,),
-    )
+    c.execute("SELECT MIN(timestamp), MAX(timestamp) FROM messages WHERE chat_id = ?", (chat_id,))
     times = c.fetchone()
     conn.close()
 
@@ -306,30 +314,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = get_settings(chat_id)
 
     save_message(chat_id, "user", user_text)
-
     history = get_history(chat_id, settings["max_history"])
-    contents = build_contents(history, settings["system_prompt"])
+
     model_name = get_model_name(settings)
+    model = get_model(model_name, settings["system_prompt"])
+
+    chat_history = build_chat_history(history)
+    last_message = history[-1]["content"] if history else user_text
 
     await update.message.chat.send_action("typing")
 
     try:
-        response = await generate_with_retry(model_name, contents)
-
-        reply = response.text or "لم أتمكن من توليد رد."
+        reply = await generate_with_retry(model, chat_history, last_message)
+        reply = reply or "لم أتمكن من توليد رد."
         save_message(chat_id, "assistant", reply)
-
-        if len(reply) > 4096:
-            for i in range(0, len(reply), 4096):
-                await update.message.reply_text(reply[i : i + 4096])
-        else:
-            await update.message.reply_text(reply)
-
+        await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
-        await update.message.reply_text(
-            "حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى."
-        )
+        await update.message.reply_text("حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى.")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -344,39 +346,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await photo.get_file()
         photo_bytes = await file.download_as_bytearray()
 
-        image_part = types.Part.from_bytes(
-            data=bytes(photo_bytes),
-            mime_type="image/jpeg",
-        )
+        image_data = {
+            "mime_type": "image/jpeg",
+            "data": bytes(photo_bytes),
+        }
 
         save_message(chat_id, "user", f"[صورة]: {caption}")
 
-        history = get_history(chat_id, settings["max_history"] - 1)
-        contents = build_contents(history[:-1], settings["system_prompt"])
-
-        contents.append(types.Content(
-            role="user",
-            parts=[image_part, types.Part.from_text(text=caption)]
-        ))
-
         model_name = get_model_name(settings)
+        model = get_model(model_name, settings["system_prompt"])
 
-        response = await generate_with_retry(model_name, contents)
-
-        reply = response.text or "لم أتمكن من تحليل الصورة."
+        reply = await generate_content_with_retry(model, [caption, image_data])
+        reply = reply or "لم أتمكن من تحليل الصورة."
         save_message(chat_id, "assistant", reply)
-
-        if len(reply) > 4096:
-            for i in range(0, len(reply), 4096):
-                await update.message.reply_text(reply[i : i + 4096])
-        else:
-            await update.message.reply_text(reply)
-
+        await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Photo analysis error: {e}")
-        await update.message.reply_text(
-            "حدث خطأ أثناء تحليل الصورة. حاول مرة أخرى."
-        )
+        await update.message.reply_text("حدث خطأ أثناء تحليل الصورة. حاول مرة أخرى.")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,45 +380,28 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.audio:
             mime_type = update.message.audio.mime_type or "audio/mpeg"
 
-        audio_part = types.Part.from_bytes(
-            data=bytes(voice_bytes),
-            mime_type=mime_type,
-        )
+        audio_data = {
+            "mime_type": mime_type,
+            "data": bytes(voice_bytes),
+        }
 
         save_message(chat_id, "user", "[رسالة صوتية]")
 
-        history = get_history(chat_id, settings["max_history"] - 1)
-        contents = build_contents(history[:-1], settings["system_prompt"])
-
-        contents.append(types.Content(
-            role="user",
-            parts=[
-                audio_part,
-                types.Part.from_text(
-                    text="استمع لهذه الرسالة الصوتية، حوّلها لنص، ثم أجب على محتواها. "
-                    "اكتب أولاً ما قاله المستخدم ثم ردك."
-                ),
-            ],
-        ))
-
         model_name = get_model_name(settings)
+        model = get_model(model_name, settings["system_prompt"])
 
-        response = await generate_with_retry(model_name, contents)
+        prompt = (
+            "استمع لهذه الرسالة الصوتية، حوّلها لنص، ثم أجب على محتواها. "
+            "اكتب أولاً ما قاله المستخدم ثم ردك."
+        )
 
-        reply = response.text or "لم أتمكن من معالجة الرسالة الصوتية."
+        reply = await generate_content_with_retry(model, [prompt, audio_data])
+        reply = reply or "لم أتمكن من معالجة الرسالة الصوتية."
         save_message(chat_id, "assistant", reply)
-
-        if len(reply) > 4096:
-            for i in range(0, len(reply), 4096):
-                await update.message.reply_text(reply[i : i + 4096])
-        else:
-            await update.message.reply_text(reply)
-
+        await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Voice processing error: {e}")
-        await update.message.reply_text(
-            "حدث خطأ أثناء معالجة الرسالة الصوتية. حاول مرة أخرى."
-        )
+        await update.message.reply_text("حدث خطأ أثناء معالجة الرسالة الصوتية. حاول مرة أخرى.")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -465,62 +434,37 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         is_text_ext = any(file_name.lower().endswith(ext) for ext in text_extensions)
 
+        save_message(chat_id, "user", f"[ملف: {file_name}]: {caption}")
+
+        model_name = get_model_name(settings)
+        model = get_model(model_name, settings["system_prompt"])
+
         if is_text or is_text_ext:
             try:
                 file_content = doc_bytes.decode("utf-8")
-                save_message(chat_id, "user", f"[ملف: {file_name}]: {caption}")
-
-                history = get_history(chat_id, settings["max_history"] - 1)
-                contents = build_contents(history[:-1], settings["system_prompt"])
-                contents.append(types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(
-                        text=f"اسم الملف: {file_name}\n"
-                        f"نوع الملف: {mime_type}\n\n"
-                        f"محتوى الملف:\n```\n{file_content[:50000]}\n```\n\n{caption}"
-                    )]
-                ))
+                prompt = (
+                    f"اسم الملف: {file_name}\n"
+                    f"نوع الملف: {mime_type}\n\n"
+                    f"محتوى الملف:\n```\n{file_content[:50000]}\n```\n\n{caption}"
+                )
+                reply = await generate_content_with_retry(model, [prompt])
             except UnicodeDecodeError:
-                save_message(chat_id, "user", f"[ملف ثنائي: {file_name}]: {caption}")
-                history = get_history(chat_id, settings["max_history"] - 1)
-                contents = build_contents(history[:-1], settings["system_prompt"])
-                contents.append(types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_bytes(data=bytes(doc_bytes), mime_type=mime_type),
-                        types.Part.from_text(text=f"اسم الملف: {file_name}\n{caption}"),
-                    ]
-                ))
+                file_data = {"mime_type": mime_type, "data": bytes(doc_bytes)}
+                reply = await generate_content_with_retry(
+                    model, [f"اسم الملف: {file_name}\n{caption}", file_data]
+                )
         else:
-            save_message(chat_id, "user", f"[ملف: {file_name}]: {caption}")
-            history = get_history(chat_id, settings["max_history"] - 1)
-            contents = build_contents(history[:-1], settings["system_prompt"])
-            contents.append(types.Content(
-                role="user",
-                parts=[
-                    types.Part.from_bytes(data=bytes(doc_bytes), mime_type=mime_type),
-                    types.Part.from_text(text=f"اسم الملف: {file_name}\n{caption}"),
-                ]
-            ))
+            file_data = {"mime_type": mime_type, "data": bytes(doc_bytes)}
+            reply = await generate_content_with_retry(
+                model, [f"اسم الملف: {file_name}\n{caption}", file_data]
+            )
 
-        model_name = get_model_name(settings)
-
-        response = await generate_with_retry(model_name, contents)
-
-        reply = response.text or "لم أتمكن من تحليل الملف."
+        reply = reply or "لم أتمكن من تحليل الملف."
         save_message(chat_id, "assistant", reply)
-
-        if len(reply) > 4096:
-            for i in range(0, len(reply), 4096):
-                await update.message.reply_text(reply[i : i + 4096])
-        else:
-            await update.message.reply_text(reply)
-
+        await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Document processing error: {e}")
-        await update.message.reply_text(
-            "حدث خطأ أثناء معالجة الملف. حاول مرة أخرى."
-        )
+        await update.message.reply_text("حدث خطأ أثناء معالجة الملف. حاول مرة أخرى.")
 
 
 async def post_init(application: Application):
@@ -540,9 +484,13 @@ def main():
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN is not set")
         return
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY is not set")
+        return
 
     init_db()
     logger.info("Database initialized")
+    logger.info(f"Using models: Flash={MODEL_FLASH}, Pro={MODEL_PRO}")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
@@ -558,8 +506,7 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    logger.info(f"Bot starting with model: {MODEL_FLASH} (default)")
-    logger.info(f"Owner ID: {OWNER_ID}")
+    logger.info(f"Bot starting... Owner ID: {OWNER_ID}")
     app.run_polling(drop_pending_updates=True)
 
 

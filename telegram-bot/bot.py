@@ -417,7 +417,11 @@ async def generate_with_retry(model_name: str, contents, config):
             return response.text or ""
         except Exception as e:
             error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
+            if "503" in error_str or "UNAVAILABLE" in error_str:
+                wait_time = 10 * (attempt + 1)
+                logger.warning(f"Service unavailable, retrying in {wait_time}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                await asyncio.sleep(wait_time)
+            elif "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
                 if "limit: 0" in error_str or "per_day" in error_str.lower() or "PerDay" in error_str:
                     raise Exception("QUOTA_EXHAUSTED_DAILY")
                 wait_match = re.search(r"([\d.]+)\s*s", error_str)
@@ -479,6 +483,8 @@ def get_error_message(e: Exception) -> str:
             "الحصة تتجدد تلقائياً كل يوم.\n"
             "يمكنك المحاولة لاحقاً أو ترقية خطتك في Google AI Studio."
         )
+    if "503" in error_str or "UNAVAILABLE" in error_str:
+        return "⚠️ سيرفر الذكاء الاصطناعي مشغول حالياً. حاول مرة ثانية بعد شوي."
     if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
         return "⚠️ تم تجاوز حد الطلبات. انتظر دقيقة ثم حاول مرة أخرى."
     if "API_KEY_INVALID" in error_str or "401" in error_str:

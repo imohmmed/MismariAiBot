@@ -56,7 +56,6 @@ externalPort = 3000
 [userenv.shared]
 TELEGRAM_BOT_TOKEN = "8385152694:AAFG8P5YyrmpR9tqta49MmhQmY_ijaFimW8"
 OWNER_ID = "1384026800"
-REQUIRED_CHANNEL = "@imismari"
 
 [nix]
 channel = "stable-25_05"

@@ -406,11 +406,22 @@ async def maybe_summarize(chat_id: int, settings: dict):
         logger.warning(f"Summary failed: {e}")
 
 
+def get_fallback_model(current_model: str) -> str | None:
+    if current_model == MODEL_SMART:
+        return MODEL_LITE
+    elif current_model == MODEL_LITE:
+        return MODEL_SMART
+    return None
+
+
 async def generate_with_retry(model_name: str, contents, config):
+    current_model = model_name
+    tried_fallback = False
+
     for attempt in range(MAX_RETRIES):
         try:
             response = client.models.generate_content(
-                model=model_name,
+                model=current_model,
                 contents=contents,
                 config=config,
             )
@@ -422,14 +433,29 @@ async def generate_with_retry(model_name: str, contents, config):
                 logger.warning(f"Service unavailable, retrying in {wait_time}s (attempt {attempt + 1}/{MAX_RETRIES})")
                 await asyncio.sleep(wait_time)
             elif "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
-                if "limit: 0" in error_str or "per_day" in error_str.lower() or "PerDay" in error_str:
-                    raise Exception("QUOTA_EXHAUSTED_DAILY")
+                is_daily_limit = "limit: 0" in error_str or "per_day" in error_str.lower() or "PerDay" in error_str
+                if is_daily_limit and not tried_fallback:
+                    fallback = get_fallback_model(current_model)
+                    if fallback:
+                        logger.warning(f"Daily quota exhausted for {current_model}, switching to {fallback}")
+                        current_model = fallback
+                        tried_fallback = True
+                        continue
+                if is_daily_limit and tried_fallback:
+                    raise Exception("QUOTA_EXHAUSTED_ALL")
                 wait_match = re.search(r"([\d.]+)\s*s", error_str)
                 wait_time = float(wait_match.group(1)) if wait_match else (15 * (attempt + 1))
                 wait_time = min(max(wait_time, 5), 60)
-                logger.warning(f"Rate limited, waiting {wait_time:.0f}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                logger.warning(f"Rate limited on {current_model}, waiting {wait_time:.0f}s (attempt {attempt + 1}/{MAX_RETRIES})")
                 await asyncio.sleep(wait_time)
             else:
+                if not tried_fallback:
+                    fallback = get_fallback_model(current_model)
+                    if fallback:
+                        logger.warning(f"Error on {current_model}, trying fallback {fallback}: {error_str}")
+                        current_model = fallback
+                        tried_fallback = True
+                        continue
                 logger.error(f"Gemini API error: {error_str}")
                 raise
     raise Exception("Max retries exceeded for Gemini API")
@@ -477,9 +503,9 @@ async def send_reply(update: Update, reply: str):
 
 def get_error_message(e: Exception) -> str:
     error_str = str(e)
-    if "QUOTA_EXHAUSTED_DAILY" in error_str:
+    if "QUOTA_EXHAUSTED_ALL" in error_str or "QUOTA_EXHAUSTED_DAILY" in error_str:
         return (
-            "⚠️ نفدت الحصة اليومية المجانية لمفتاح Gemini API.\n"
+            "⚠️ نفدت الحصة اليومية لجميع الموديلات.\n"
             "الحصة تتجدد تلقائياً كل يوم.\n"
             "يمكنك المحاولة لاحقاً أو ترقية خطتك في Google AI Studio."
         )

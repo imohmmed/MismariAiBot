@@ -32,6 +32,15 @@ MAX_RETRIES = 4
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "conversations.db")
 
+MISMARI_SYSTEM_INSTRUCTION = """أنت الآن "مسماري" (Mismari).
+أنت مساعد ذكاء اصطناعي ذكي، تقني، وودود.
+من تطوير المبرمج "@mohmmed".
+عندما يسألك شخص عن اسمك، أجب بـ: "أنا مسماري، مساعدك الذكي".
+يجب أن تتحدث بلهجة عراقية تقنية مهذبة أو لغة عربية فصحى حسب رغبة المستخدم.
+لا تخرج عن هذه الشخصية أبداً.
+إذا سُئلت من صنعك أو من طورك، قل: "أنا من تطوير المبرمج محمد (@mohmmed)".
+كن مفيداً، دقيقاً، ومختصراً في إجاباتك مع الحفاظ على الجودة."""
+
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
@@ -127,18 +136,14 @@ def get_model_name(settings: dict) -> str:
     return MODEL_PRO if settings["model"] == "pro" else MODEL_FLASH
 
 
-def build_contents(history: list[dict], system_prompt: str = "") -> list[types.Content]:
-    contents = []
-    if system_prompt:
-        contents.append(types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=f"[System Instructions]: {system_prompt}")]
-        ))
-        contents.append(types.Content(
-            role="model",
-            parts=[types.Part.from_text(text="Understood. I will follow these instructions.")]
-        ))
+def get_full_system_instruction(custom_prompt: str = "") -> str:
+    if custom_prompt:
+        return MISMARI_SYSTEM_INSTRUCTION + "\n\nتعليمات إضافية من المستخدم:\n" + custom_prompt
+    return MISMARI_SYSTEM_INSTRUCTION
 
+
+def build_contents(history: list[dict]) -> list[types.Content]:
+    contents = []
     for msg in history:
         role = "model" if msg["role"] == "assistant" else "user"
         contents.append(types.Content(
@@ -148,10 +153,14 @@ def build_contents(history: list[dict], system_prompt: str = "") -> list[types.C
     return contents
 
 
-async def generate_with_retry(model_name: str, contents, config=None):
-    if config is None:
-        config = types.GenerateContentConfig(max_output_tokens=8192)
+def make_config(system_instruction: str) -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        max_output_tokens=8192,
+    )
 
+
+async def generate_with_retry(model_name: str, contents, config):
     for attempt in range(MAX_RETRIES):
         try:
             response = client.models.generate_content(
@@ -201,19 +210,20 @@ def get_error_message(e: Exception) -> str:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
-        "مرحباً! أنا بوت ذكي مدعوم بـ Gemini AI.\n\n"
-        "الأوامر المتاحة:\n"
-        "/start - بدء المحادثة\n"
-        "/clear - مسح سجل المحادثة\n"
-        "/model - تبديل الموديل (flash/pro)\n"
-        "/system - تعيين تعليمات النظام\n"
-        "/stats - إحصائيات المحادثة\n"
-        "/help - المساعدة\n\n"
+        "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n\n"
+        "أنا مساعدك الذكي من تطوير المبرمج محمد (@mohmmed).\n\n"
+        "شلون أكدر أساعدك اليوم؟\n\n"
         "يمكنك:\n"
         "• إرسال نصوص للدردشة\n"
         "• إرسال صور لتحليلها\n"
         "• إرسال رسائل صوتية لتحويلها لنص والرد عليها\n"
-        "• إرسال ملفات للتحليل\n"
+        "• إرسال ملفات للتحليل\n\n"
+        "الأوامر المتاحة:\n"
+        "/help - المساعدة\n"
+        "/model - تبديل الموديل\n"
+        "/system - تعليمات إضافية\n"
+        "/clear - مسح سجل المحادثة\n"
+        "/stats - إحصائيات المحادثة"
     )
     await update.message.reply_text(welcome)
 
@@ -222,6 +232,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = get_settings(update.effective_chat.id)
     model_label = "Flash 2.5 (ذكي ومتوازن)" if settings["model"] == "pro" else "Flash Lite 2.5 (سريع جداً)"
     help_text = (
+        "أنا مسماري، مساعدك الذكي 🤖\n\n"
         f"الموديل الحالي: {model_label}\n\n"
         "الميزات:\n"
         "1. دردشة نصية مع ذاكرة محادثة\n"
@@ -231,7 +242,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "الأوامر:\n"
         "/model flash - Flash Lite سريع جداً (1000 طلب/يوم)\n"
         "/model pro - Flash 2.5 ذكي ومتوازن (250 طلب/يوم)\n"
-        "/system <prompt> - تعيين شخصية البوت\n"
+        "/system <prompt> - تعليمات إضافية للبوت\n"
         "/clear - مسح الذاكرة\n"
         "/stats - إحصائيات\n"
     )
@@ -240,7 +251,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_history(update.effective_chat.id)
-    await update.message.reply_text("تم مسح سجل المحادثة بنجاح.")
+    await update.message.reply_text("تم مسح سجل المحادثة بنجاح. نبدي من جديد! 🔄")
 
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -267,22 +278,22 @@ async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt_text = " ".join(context.args)
         if prompt_text.lower() == "reset":
             update_setting(chat_id, "system_prompt", "")
-            await update.message.reply_text("تم مسح تعليمات النظام.")
+            await update.message.reply_text("تم مسح التعليمات الإضافية. شخصية مسماري الأساسية لا تزال فعّالة.")
         else:
             update_setting(chat_id, "system_prompt", prompt_text)
-            await update.message.reply_text(f"تم تعيين تعليمات النظام:\n{prompt_text}")
+            await update.message.reply_text(f"تم تعيين تعليمات إضافية:\n{prompt_text}")
     else:
         settings = get_settings(chat_id)
         if settings["system_prompt"]:
             await update.message.reply_text(
-                f"التعليمات الحالية:\n{settings['system_prompt']}\n\n"
+                f"التعليمات الإضافية الحالية:\n{settings['system_prompt']}\n\n"
                 "لتغييرها: /system <التعليمات الجديدة>\n"
                 "لمسحها: /system reset"
             )
         else:
             await update.message.reply_text(
-                "لا توجد تعليمات نظام حالياً.\n"
-                "لتعيينها: /system <التعليمات>"
+                "لا توجد تعليمات إضافية حالياً (شخصية مسماري الأساسية فعّالة).\n"
+                "لإضافة تعليمات: /system <التعليمات>"
             )
 
 
@@ -304,10 +315,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_label = "Flash 2.5" if settings["model"] == "pro" else "Flash Lite 2.5"
 
     stats_text = (
-        f"إحصائيات المحادثة:\n\n"
+        f"📊 إحصائيات مسماري:\n\n"
         f"إجمالي الرسائل: {total}\n"
         f"رسائلك: {user_msgs}\n"
-        f"ردود البوت: {bot_msgs}\n"
+        f"ردود مسماري: {bot_msgs}\n"
         f"الموديل: {model_label}\n"
     )
     if times[0]:
@@ -324,13 +335,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_message(chat_id, "user", user_text)
     history = get_history(chat_id, settings["max_history"])
-    contents = build_contents(history, settings["system_prompt"])
+    contents = build_contents(history)
     model_name = get_model_name(settings)
+    config = make_config(get_full_system_instruction(settings["system_prompt"]))
 
     await update.message.chat.send_action("typing")
 
     try:
-        reply = await generate_with_retry(model_name, contents)
+        reply = await generate_with_retry(model_name, contents, config)
         reply = reply or "لم أتمكن من توليد رد."
         save_message(chat_id, "assistant", reply)
         await send_reply(update, reply)
@@ -357,11 +369,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message(chat_id, "user", f"[صورة]: {caption}")
 
         history = get_history(chat_id, settings["max_history"] - 1)
-        contents = build_contents(history[:-1], settings["system_prompt"])
+        contents = build_contents(history[:-1])
         contents.append(types.Content(role="user", parts=[image_part, text_part]))
 
         model_name = get_model_name(settings)
-        reply = await generate_with_retry(model_name, contents)
+        config = make_config(get_full_system_instruction(settings["system_prompt"]))
+        reply = await generate_with_retry(model_name, contents, config)
         reply = reply or "لم أتمكن من تحليل الصورة."
         save_message(chat_id, "assistant", reply)
         await send_reply(update, reply)
@@ -394,11 +407,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message(chat_id, "user", "[رسالة صوتية]")
 
         history = get_history(chat_id, settings["max_history"] - 1)
-        contents = build_contents(history[:-1], settings["system_prompt"])
+        contents = build_contents(history[:-1])
         contents.append(types.Content(role="user", parts=[audio_part, text_part]))
 
         model_name = get_model_name(settings)
-        reply = await generate_with_retry(model_name, contents)
+        config = make_config(get_full_system_instruction(settings["system_prompt"]))
+        reply = await generate_with_retry(model_name, contents, config)
         reply = reply or "لم أتمكن من معالجة الرسالة الصوتية."
         save_message(chat_id, "assistant", reply)
         await send_reply(update, reply)
@@ -440,7 +454,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message(chat_id, "user", f"[ملف: {file_name}]: {caption}")
 
         history = get_history(chat_id, settings["max_history"] - 1)
-        contents = build_contents(history[:-1], settings["system_prompt"])
+        contents = build_contents(history[:-1])
 
         if is_text or is_text_ext:
             try:
@@ -464,7 +478,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             contents.append(types.Content(role="user", parts=[file_part, text_part]))
 
         model_name = get_model_name(settings)
-        reply = await generate_with_retry(model_name, contents)
+        config = make_config(get_full_system_instruction(settings["system_prompt"]))
+        reply = await generate_with_retry(model_name, contents, config)
         reply = reply or "لم أتمكن من تحليل الملف."
         save_message(chat_id, "assistant", reply)
         await send_reply(update, reply)
@@ -475,11 +490,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     commands = [
-        BotCommand("start", "بدء المحادثة"),
+        BotCommand("start", "بدء المحادثة مع مسماري"),
         BotCommand("help", "المساعدة"),
         BotCommand("clear", "مسح سجل المحادثة"),
         BotCommand("model", "تبديل الموديل (flash/pro)"),
-        BotCommand("system", "تعيين تعليمات النظام"),
+        BotCommand("system", "تعليمات إضافية"),
         BotCommand("stats", "إحصائيات المحادثة"),
     ]
     await application.bot.set_my_commands(commands)
@@ -497,7 +512,7 @@ def main():
     init_db()
     logger.info("Database initialized")
     logger.info(f"Models: Flash={MODEL_FLASH}, Pro={MODEL_PRO}")
-    logger.info("Using Google AI Studio API key directly")
+    logger.info("Mismari bot using Google AI Studio API key")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 

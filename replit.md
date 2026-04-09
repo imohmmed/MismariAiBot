@@ -34,13 +34,17 @@ Located in `telegram-bot/` directory. A Python Telegram bot with persona "Mismar
 - **Token optimization**: Short max_tokens (1024) for simple queries, full (8192) for complex
 - **Image/voice/document analysis**: Full multimodal support
 - **Custom system prompts**: ConversationHandler flow for /system command
-- **Commands**: /start, /help, /system, /clear, /stats
+- **Forced channel subscription**: Configurable via REQUIRED_CHANNEL env var
+- **Admin dashboard**: /admin shows full stats (owner-only)
+- **User tracking**: SQLite users table tracks all users with activity data
+- **Commands**: /start, /help, /system, /clear, /stats, /admin
 
 ### Environment Variables
 
 - `TELEGRAM_BOT_TOKEN` — Telegram bot API token
 - `OWNER_ID` — Telegram user ID of the bot owner
 - `GEMINI_API_KEY` — User's own Google AI Studio API key
+- `REQUIRED_CHANNEL` — (Optional) Telegram channel username for forced subscription (e.g. @mychannel)
 
 ### Model Routing Logic
 

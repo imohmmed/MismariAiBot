@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL", "")
 
 MODEL_LITE = "gemini-2.5-flash-lite"
 MODEL_SMART = "gemini-2.5-flash"
@@ -100,6 +101,18 @@ def init_db():
             question TEXT NOT NULL,
             answer TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT DEFAULT '',
+            first_name TEXT DEFAULT '',
+            last_name TEXT DEFAULT '',
+            first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
+            message_count INTEGER DEFAULT 0,
+            is_blocked INTEGER DEFAULT 0
         )
     """)
     c.execute("""
@@ -201,6 +214,52 @@ def cache_response(question: str, answer: str):
     )
     conn.commit()
     conn.close()
+
+
+def track_user(user):
+    if not user or user.is_bot:
+        return
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO users (user_id, username, first_name, last_name)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET
+               username = excluded.username,
+               first_name = excluded.first_name,
+               last_name = excluded.last_name,
+               last_active = CURRENT_TIMESTAMP,
+               message_count = users.message_count + 1""",
+        (user.id, user.username or "", user.first_name or "", user.last_name or ""),
+    )
+    conn.commit()
+    conn.close()
+
+
+async def check_subscription(update: Update) -> bool:
+    if not REQUIRED_CHANNEL:
+        return True
+    if update.effective_user and update.effective_user.id == OWNER_ID:
+        return True
+    try:
+        channel = REQUIRED_CHANNEL if REQUIRED_CHANNEL.startswith("@") else f"@{REQUIRED_CHANNEL}"
+        member = await update.get_bot().get_chat_member(
+            chat_id=channel,
+            user_id=update.effective_user.id,
+        )
+        if member.status in ("member", "administrator", "creator"):
+            return True
+    except Exception as e:
+        logger.warning(f"Subscription check failed: {e}")
+        return True
+
+    channel_link = f"https://t.me/{REQUIRED_CHANNEL.lstrip('@')}"
+    await update.message.reply_text(
+        f"⚠️ يجب عليك الاشتراك في القناة أولاً للاستخدام:\n\n"
+        f"👉 {channel_link}\n\n"
+        f"بعد الاشتراك، أرسل رسالتك مرة ثانية.",
+    )
+    return False
 
 
 IDENTITY_PATTERNS = [
@@ -415,6 +474,7 @@ def get_error_message(e: Exception) -> str:
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user(update.effective_user)
     welcome = (
         "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n\n"
         "أنا مساعدك الذكي من تطوير المبرمج محمد (@mohmmed).\n\n"
@@ -510,6 +570,104 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط لمالك البوت.")
+        return
+
+    conn = get_db()
+    c = conn.cursor()
+
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM users WHERE last_active >= datetime('now', '-1 day')")
+    active_today = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM users WHERE last_active >= datetime('now', '-7 days')")
+    active_week = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM messages")
+    total_messages = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM messages WHERE role = 'user'")
+    user_messages = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM messages WHERE role = 'assistant'")
+    bot_messages = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM messages WHERE content_type = 'image'")
+    image_count = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM messages WHERE content_type = 'voice'")
+    voice_count = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM messages WHERE content_type = 'document'")
+    doc_count = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM response_cache")
+    cache_count = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(DISTINCT chat_id) FROM messages")
+    active_chats = c.fetchone()[0]
+
+    c.execute("""
+        SELECT user_id, username, first_name, message_count, last_active
+        FROM users ORDER BY message_count DESC LIMIT 10
+    """)
+    top_users = c.fetchall()
+
+    c.execute("""
+        SELECT user_id, username, first_name, first_seen
+        FROM users ORDER BY first_seen DESC LIMIT 5
+    """)
+    new_users = c.fetchall()
+
+    c.execute("SELECT MIN(first_seen) FROM users")
+    oldest = c.fetchone()[0] or "غير متوفر"
+
+    conn.close()
+
+    channel_status = f"✅ {REQUIRED_CHANNEL}" if REQUIRED_CHANNEL else "❌ غير مفعّل"
+
+    admin_text = (
+        "🔐 <b>لوحة تحكم مسماري - إحصائيات كاملة</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👥 <b>المستخدمين:</b>\n"
+        f"  • إجمالي المستخدمين: <b>{total_users}</b>\n"
+        f"  • نشطين اليوم: <b>{active_today}</b>\n"
+        f"  • نشطين هالأسبوع: <b>{active_week}</b>\n"
+        f"  • محادثات فعّالة: <b>{active_chats}</b>\n\n"
+        "💬 <b>الرسائل:</b>\n"
+        f"  • إجمالي الرسائل: <b>{total_messages}</b>\n"
+        f"  • رسائل المستخدمين: <b>{user_messages}</b>\n"
+        f"  • ردود مسماري: <b>{bot_messages}</b>\n\n"
+        "📎 <b>الوسائط:</b>\n"
+        f"  • صور: <b>{image_count}</b>\n"
+        f"  • صوتيات: <b>{voice_count}</b>\n"
+        f"  • ملفات: <b>{doc_count}</b>\n\n"
+        "⚙️ <b>النظام:</b>\n"
+        f"  • ردود مخزنة (كاش): <b>{cache_count}</b>\n"
+        f"  • اشتراك إجباري: {channel_status}\n"
+        f"  • أول مستخدم: {oldest}\n\n"
+    )
+
+    if top_users:
+        admin_text += "🏆 <b>أكثر المستخدمين نشاطاً:</b>\n"
+        for i, (uid, uname, fname, count, last) in enumerate(top_users, 1):
+            name = f"@{uname}" if uname else fname or str(uid)
+            admin_text += f"  {i}. {name} — <b>{count}</b> رسالة\n"
+        admin_text += "\n"
+
+    if new_users:
+        admin_text += "🆕 <b>أحدث المستخدمين:</b>\n"
+        for uid, uname, fname, joined in new_users:
+            name = f"@{uname}" if uname else fname or str(uid)
+            admin_text += f"  • {name} — {joined}\n"
+
+    await send_reply(update, admin_text)
+
+
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     conn = get_db()
@@ -545,6 +703,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user(update.effective_user)
+    if not await check_subscription(update):
+        return
     chat_id = update.effective_chat.id
     user_text = update.message.text
     settings = get_settings(chat_id)
@@ -587,6 +748,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user(update.effective_user)
+    if not await check_subscription(update):
+        return
     chat_id = update.effective_chat.id
     settings = get_settings(chat_id)
     caption = update.message.caption or "حلل هذه الصورة بالتفصيل."
@@ -621,6 +785,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user(update.effective_user)
+    if not await check_subscription(update):
+        return
     chat_id = update.effective_chat.id
     settings = get_settings(chat_id)
 
@@ -659,6 +826,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user(update.effective_user)
+    if not await check_subscription(update):
+        return
     chat_id = update.effective_chat.id
     settings = get_settings(chat_id)
     caption = update.message.caption or "حلل هذا الملف بالتفصيل."
@@ -732,6 +902,7 @@ async def post_init(application: Application):
         BotCommand("system", "ضبط تعليمات إضافية"),
         BotCommand("clear", "مسح سجل المحادثة"),
         BotCommand("stats", "إحصائيات المحادثة"),
+        BotCommand("admin", "لوحة تحكم المالك"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Bot commands registered successfully")
@@ -767,6 +938,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(system_conv)
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

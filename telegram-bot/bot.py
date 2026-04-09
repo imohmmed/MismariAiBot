@@ -6,10 +6,7 @@ import logging
 import asyncio
 import re
 import hashlib
-import subprocess
-import tempfile
 from datetime import datetime
-from urllib.parse import urlparse
 
 from google import genai
 from google.genai import types
@@ -78,169 +75,6 @@ COMPLEX_KEYWORDS = [
 ]
 
 AWAITING_SYSTEM_PROMPT = 1
-
-SUPPORTED_PLATFORMS = {
-    "youtube.com": "يوتيوب",
-    "youtu.be": "يوتيوب",
-    "tiktok.com": "تيكتوك",
-    "spotify.com": "سبوتيفاي",
-    "soundcloud.com": "ساوندكلاود",
-    "deezer.com": "ديزر",
-    "facebook.com": "فيسبوك",
-    "fb.watch": "فيسبوك",
-    "twitter.com": "تويتر",
-    "x.com": "تويتر",
-    "pinterest.com": "بنترست",
-    "threads.net": "ثريدز",
-    "drive.google.com": "جوجل درايف",
-    "snapchat.com": "سنابشات",
-    "likee.video": "لايكي",
-    "kwai.com": "كواي",
-}
-
-YT_DLP_PATH = os.environ.get("YT_DLP_PATH", "yt-dlp")
-COOKIES_FILE = os.environ.get("COOKIES_FILE", "")
-MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
-
-
-def detect_platform(url: str) -> str | None:
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        host = host.lower().replace("www.", "").replace("m.", "")
-        for domain, name in SUPPORTED_PLATFORMS.items():
-            if domain in host:
-                return name
-    except Exception:
-        pass
-    return None
-
-
-def is_supported_url(text: str) -> str | None:
-    url_match = re.search(r'https?://\S+', text)
-    if url_match:
-        url = url_match.group(0)
-        if detect_platform(url):
-            return url
-    return None
-
-
-def _is_youtube(url: str) -> bool:
-    return "youtube.com" in url or "youtu.be" in url
-
-
-def _base_ytdlp_args(url: str) -> list:
-    args = [YT_DLP_PATH, "--no-warnings", "--no-playlist"]
-    cookies_file = COOKIES_PATH if os.path.exists(COOKIES_PATH) else (COOKIES_FILE if COOKIES_FILE and os.path.exists(COOKIES_FILE) else None)
-    if cookies_file:
-        args.extend(["--cookies", cookies_file])
-    if _is_youtube(url):
-        args.extend([
-            "--extractor-args", "youtube:player_client=ios,web",
-        ])
-    return args
-
-
-def _classify_error(err_msg: str, platform: str) -> str:
-    lo = err_msg.lower()
-    if any(k in lo for k in ["sign in", "login required", "authentication required", "private video", "age-restricted", "/login/", "facebook.com/login", "requires authentication"]):
-        return f"هذا المقطع يحتاج تسجيل دخول على {platform}.\nارسل رابط الفيديو المباشر بدل رابط المشاركة." if "facebook" in platform.lower() else f"هذا المقطع يحتاج تسجيل دخول على {platform}."
-    if any(k in lo for k in ["not available", "unavailable", "has been removed", "no longer available", "removed", "does not exist"]):
-        return "المقطع محذوف أو غير متاح."
-    if "404" in lo:
-        return "الرابط غير موجود. تحقق من الرابط."
-    if any(k in lo for k in ["private", "members only"]):
-        return "المقطع خاص ولا يمكن تحميله."
-    if "50 ميغابايت" in err_msg:
-        return "حجم الملف أكبر من 50 ميغابايت."
-    if any(k in lo for k in ["timed out", "timeout"]):
-        return "انتهت المهلة، حاول مرة ثانية."
-    if any(k in lo for k in ["unsupported url"]):
-        if "login" in lo:
-            return f"هذا المقطع يحتاج تسجيل دخول على {platform}."
-        return "هذا الرابط غير مدعوم. جرب رابطاً مختلفاً."
-    if any(k in lo for k in ["format", "no video formats"]):
-        return "لم يتم العثور على صيغة مناسبة للتحميل."
-    return "تحقق من الرابط وحاول مرة ثانية."
-
-
-async def download_media(url: str, download_type: str = "video") -> dict:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output_template = os.path.join(tmpdir, "%(title).50s.%(ext)s")
-
-        args = _base_ytdlp_args(url)
-
-        if download_type == "audio":
-            args.extend(["-f", "bestaudio", "-x", "--audio-format", "mp3"])
-            output_template = os.path.join(tmpdir, "%(title).50s.mp3")
-        else:
-            args.extend([
-                "-f", "bestvideo[vcodec^=avc1][filesize<50M]+bestaudio[ext=m4a]/best[filesize<50M]/best",
-                "--merge-output-format", "mp4",
-            ])
-
-        args.extend(["-o", output_template, url])
-
-        try:
-            info_args = _base_ytdlp_args(url) + ["--dump-json", "--no-download"]
-            info_args.append(url)
-
-            info_proc = await asyncio.create_subprocess_exec(
-                *info_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            info_stdout, _ = await asyncio.wait_for(info_proc.communicate(), timeout=30)
-            info = json.loads(info_stdout.decode()) if info_stdout else {}
-            title = info.get("title", "تحميل")
-            thumbnail = info.get("thumbnail", None)
-            duration = info.get("duration", None)
-            uploader = info.get("uploader", None)
-        except Exception:
-            title = "تحميل"
-            thumbnail = None
-            duration = None
-            uploader = None
-
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-
-        if proc.returncode != 0:
-            err_msg = stderr.decode()[:500] if stderr else "Unknown error"
-            raise Exception(err_msg)
-
-        files = []
-        for f in os.listdir(tmpdir):
-            filepath = os.path.join(tmpdir, f)
-            if os.path.isfile(filepath):
-                files.append(filepath)
-
-        if not files:
-            raise Exception("لم يتم العثور على ملف بعد التحميل")
-
-        filepath = files[0]
-        file_size = os.path.getsize(filepath)
-
-        if file_size > MAX_TELEGRAM_FILE_SIZE:
-            raise Exception("حجم الملف أكبر من 50 ميغابايت. تيليكرام ما يدعم ملفات بهالحجم.")
-
-        with open(filepath, "rb") as f:
-            file_bytes = f.read()
-
-        return {
-            "bytes": file_bytes,
-            "title": title,
-            "thumbnail": thumbnail,
-            "duration": duration,
-            "uploader": uploader,
-            "filename": os.path.basename(filepath),
-            "size": file_size,
-            "type": download_type,
-        }
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -719,10 +553,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         'أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية <tg-emoji emoji-id="5287684458881756303">🤖</tg-emoji>\n'
         "شلون أكدر أساعدك اليوم؟\n\n"
-        '<tg-emoji emoji-id="5258514780469075716">📥</tg-emoji> تحميل المحتوى من:\n'
-        "يوتيوب • تيكتوك • سبوتيفاي • ساوندكلاود • ديزر\n"
-        "فيسبوك • تويتر • بنترست • ثريدز • سنابشات\n"
-        "جوجل درايف • لايكي • كواي\n\n"
         '• إرسال نصوص للدردشة <tg-emoji emoji-id="5891243564309942507">💬</tg-emoji>\n'
         '• إرسال صور لتحليلها <tg-emoji emoji-id="5775949822993371030">📷</tg-emoji>\n'
         '• إرسال رسائل صوتية <tg-emoji emoji-id="5897554554894946515">🎤</tg-emoji>\n'
@@ -739,8 +569,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 أنا مسماري، مساعدك الذكي\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📥 تحميل المحتوى:\n"
-        "أرسل رابط من أي منصة مدعومة وأحمّله لك مباشرة!\n\n"
         "🤖 ذكاء اصطناعي:\n"
         "• دردشة ذكية مع ذاكرة محادثة\n"
         "• تحليل الصور والملفات\n"
@@ -753,7 +581,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - عرض هذه الرسالة\n\n"
         f"📋 التعليمات الإضافية: {has_custom}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 أرسل رابط للتحميل أو أي رسالة للدردشة!"
+        "💡 أرسل أي رسالة للبدء بالدردشة!"
     )
     await update.message.reply_text(help_text)
 
@@ -912,64 +740,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_reply(update, admin_text)
 
 
-COOKIES_PATH = os.environ.get("COOKIES_FILE", "/var/www/AiBot/cookies.txt")
-
-
-async def setcookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != OWNER_ID:
-        return
-
-    if not update.message.document:
-        await update.message.reply_text(
-            "📎 <b>رفع ملف الكوكيز ليوتيوب</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            "<b>الخطوات:</b>\n"
-            "1️⃣ حمّل إضافة المتصفح:\n"
-            '   Chrome: <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc">Get cookies.txt LOCALLY</a>\n\n'
-            "2️⃣ افتح <a href=\"https://youtube.com\">youtube.com</a> وأنت مسجّل دخول\n\n"
-            "3️⃣ اضغط على أيقونة الإضافة ← <b>Export</b>\n\n"
-            "4️⃣ أرسل الملف هنا كمرفق (ملف نصي .txt)\n\n"
-            "⚠️ لا تشارك هذا الملف مع أحد — يحتوي على بيانات حسابك",
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        return
-
-    doc = update.message.document
-    if doc.file_size > 500 * 1024:
-        await update.message.reply_text("❌ الملف كبير جداً (الحد الأقصى 500KB)")
-        return
-
-    status = await update.message.reply_text("⏳ جاري حفظ الكوكيز...")
-    try:
-        file = await doc.get_file()
-        buf = io.BytesIO()
-        await file.download_to_memory(buf)
-        content = buf.getvalue().decode("utf-8")
-
-        if "youtube.com" not in content and "# Netscape HTTP Cookie File" not in content:
-            await status.edit_text("❌ الملف لا يبدو ملف كوكيز صحيح. تأكد من تصديره بشكل صحيح.")
-            return
-
-        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-            f.write(content)
-
-        global COOKIES_FILE
-        COOKIES_FILE = COOKIES_PATH
-
-        await status.edit_text(
-            f"✅ تم حفظ الكوكيز بنجاح!\n\n"
-            f"📁 المسار: <code>{COOKIES_PATH}</code>\n"
-            f"📊 الحجم: {len(content):,} حرف\n\n"
-            "يوتيوب يجب أن يشتغل الحين.",
-            parse_mode="HTML",
-        )
-        logger.info(f"Cookies updated by owner, size={len(content)}")
-
-    except Exception as e:
-        await status.edit_text(f"❌ فشل الحفظ: {e}")
-
-
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     conn = get_db()
@@ -1022,56 +792,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
 
-async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
-    platform = detect_platform(url)
-    dl_type = "video"
-
-    status_msg = await update.message.reply_text(
-        f"⏳ جاري تحميل فيديو من {platform}...\nانتظر شوي...",
-    )
-
-    await update.message.chat.send_action("upload_video")
-
-    try:
-        result = await download_media(url, dl_type)
-        file_bytes = io.BytesIO(result["bytes"])
-        file_bytes.name = result["filename"]
-
-        size_mb = result["size"] / (1024 * 1024)
-        caption = f"📥 {result['title']}"
-        if result.get("uploader"):
-            caption += f"\n👤 {result['uploader']}"
-        caption += f"\n📊 {size_mb:.1f} MB"
-        caption += f"\n🔗 {platform}"
-
-        await update.message.reply_video(
-            video=file_bytes,
-            caption=caption,
-            duration=int(result["duration"]) if result.get("duration") else None,
-            supports_streaming=True,
-        )
-
-        await status_msg.delete()
-        logger.info(f"Download success: {platform} ({dl_type}) - {size_mb:.1f}MB")
-
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Download error ({platform}): {error_msg[:200]}")
-        detail = _classify_error(error_msg, platform)
-        await status_msg.edit_text(f"❌ فشل التحميل. {detail}")
-
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user(update.effective_user)
     if not await check_subscription(update):
         return
 
     user_text = update.message.text
-
-    url = is_supported_url(user_text)
-    if url:
-        await handle_download(update, context, url)
-        return
 
     chat_id = update.effective_chat.id
     settings = get_settings(chat_id)
@@ -1326,7 +1052,6 @@ def main():
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("admin", admin_command))
-    app.add_handler(CommandHandler("setcookies", setcookies_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(system_conv)
 

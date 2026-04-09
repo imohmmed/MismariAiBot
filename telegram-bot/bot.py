@@ -461,6 +461,22 @@ async def generate_with_retry(model_name: str, contents, config):
     raise Exception("Max retries exceeded for Gemini API")
 
 
+def escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def escape_code_blocks(text: str) -> str:
+    def escape_pre(m):
+        lang = m.group(1) or ""
+        code = m.group(2)
+        code = escape_html(code)
+        return f'<pre>{code}</pre>'
+
+    text = re.sub(r'<pre(?:\s+[^>]*)?>(.*?)</pre>', lambda m: f'<pre>{escape_html(m.group(1))}</pre>', text, flags=re.DOTALL)
+    text = re.sub(r'<code>(.*?)</code>', lambda m: f'<code>{escape_html(m.group(1))}</code>', text, flags=re.DOTALL)
+    return text
+
+
 def sanitize_html(text: str) -> str:
     text = re.sub(r'<br\s*/?>', '\n', text)
     text = re.sub(r'</?p\s*/?>', '\n', text)
@@ -469,8 +485,9 @@ def sanitize_html(text: str) -> str:
     text = re.sub(r'<li[^>]*>\s*', '• ', text)
     text = re.sub(r'</li>', '\n', text)
     text = re.sub(r'</?(?:ul|ol|div|span|table|tr|td|th|thead|tbody)[^>]*>', '', text)
-    text = re.sub(r'```(\w*)\n?(.*?)```', lambda m: f'<pre>{m.group(2)}</pre>', text, flags=re.DOTALL)
-    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    text = re.sub(r'```(\w*)\n?(.*?)```', lambda m: f'<pre>{escape_html(m.group(2))}</pre>', text, flags=re.DOTALL)
+    text = re.sub(r'`([^`]+)`', lambda m: f'<code>{escape_html(m.group(1))}</code>', text)
+    text = escape_code_blocks(text)
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'(?<!\w)\*(.+?)\*(?!\w)', r'<i>\1</i>', text)
     text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)

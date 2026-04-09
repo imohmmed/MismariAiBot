@@ -131,12 +131,12 @@ def _is_youtube(url: str) -> bool:
 
 def _base_ytdlp_args(url: str) -> list:
     args = [YT_DLP_PATH, "--no-warnings", "--no-playlist"]
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        args.extend(["--cookies", COOKIES_FILE])
+    cookies_file = COOKIES_PATH if os.path.exists(COOKIES_PATH) else (COOKIES_FILE if COOKIES_FILE and os.path.exists(COOKIES_FILE) else None)
+    if cookies_file:
+        args.extend(["--cookies", cookies_file])
     if _is_youtube(url):
         args.extend([
             "--extractor-args", "youtube:player_client=ios,web",
-            "--add-headers", "User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
         ])
     return args
 
@@ -912,6 +912,64 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_reply(update, admin_text)
 
 
+COOKIES_PATH = os.environ.get("COOKIES_FILE", "/var/www/AiBot/cookies.txt")
+
+
+async def setcookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.effective_user.id != OWNER_ID:
+        return
+
+    if not update.message.document:
+        await update.message.reply_text(
+            "📎 <b>رفع ملف الكوكيز ليوتيوب</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "<b>الخطوات:</b>\n"
+            "1️⃣ حمّل إضافة المتصفح:\n"
+            '   Chrome: <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc">Get cookies.txt LOCALLY</a>\n\n'
+            "2️⃣ افتح <a href=\"https://youtube.com\">youtube.com</a> وأنت مسجّل دخول\n\n"
+            "3️⃣ اضغط على أيقونة الإضافة ← <b>Export</b>\n\n"
+            "4️⃣ أرسل الملف هنا كمرفق (ملف نصي .txt)\n\n"
+            "⚠️ لا تشارك هذا الملف مع أحد — يحتوي على بيانات حسابك",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return
+
+    doc = update.message.document
+    if doc.file_size > 500 * 1024:
+        await update.message.reply_text("❌ الملف كبير جداً (الحد الأقصى 500KB)")
+        return
+
+    status = await update.message.reply_text("⏳ جاري حفظ الكوكيز...")
+    try:
+        file = await doc.get_file()
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        content = buf.getvalue().decode("utf-8")
+
+        if "youtube.com" not in content and "# Netscape HTTP Cookie File" not in content:
+            await status.edit_text("❌ الملف لا يبدو ملف كوكيز صحيح. تأكد من تصديره بشكل صحيح.")
+            return
+
+        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        global COOKIES_FILE
+        COOKIES_FILE = COOKIES_PATH
+
+        await status.edit_text(
+            f"✅ تم حفظ الكوكيز بنجاح!\n\n"
+            f"📁 المسار: <code>{COOKIES_PATH}</code>\n"
+            f"📊 الحجم: {len(content):,} حرف\n\n"
+            "يوتيوب يجب أن يشتغل الحين.",
+            parse_mode="HTML",
+        )
+        logger.info(f"Cookies updated by owner, size={len(content)}")
+
+    except Exception as e:
+        await status.edit_text(f"❌ فشل الحفظ: {e}")
+
+
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     conn = get_db()
@@ -1268,6 +1326,7 @@ def main():
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("setcookies", setcookies_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(system_conv)
 

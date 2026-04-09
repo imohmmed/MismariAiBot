@@ -26,8 +26,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-MODEL_FLASH = "gemini-2.5-flash"
-MODEL_PRO = "gemini-2.5-pro"
+MODEL_FLASH = "gemini-2.5-flash-lite"
+MODEL_PRO = "gemini-2.5-flash"
 MAX_RETRIES = 4
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "conversations.db")
@@ -220,7 +220,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = get_settings(update.effective_chat.id)
-    model_label = "Pro (تفكير عميق)" if settings["model"] == "pro" else "Flash (سريع)"
+    model_label = "Flash 2.5 (ذكي ومتوازن)" if settings["model"] == "pro" else "Flash Lite 2.5 (سريع جداً)"
     help_text = (
         f"الموديل الحالي: {model_label}\n\n"
         "الميزات:\n"
@@ -229,8 +229,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3. تحليل الرسائل الصوتية\n"
         "4. تحليل الملفات والمستندات\n\n"
         "الأوامر:\n"
-        "/model flash - موديل سريع وموفر\n"
-        "/model pro - موديل للمهام المعقدة\n"
+        "/model flash - Flash Lite سريع جداً (1000 طلب/يوم)\n"
+        "/model pro - Flash 2.5 ذكي ومتوازن (250 طلب/يوم)\n"
         "/system <prompt> - تعيين شخصية البوت\n"
         "/clear - مسح الذاكرة\n"
         "/stats - إحصائيات\n"
@@ -248,16 +248,16 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0] in ("flash", "pro"):
         model_choice = context.args[0]
         update_setting(chat_id, "model", model_choice)
-        label = "Flash (سريع وموفر)" if model_choice == "flash" else "Pro (تفكير عميق)"
+        label = "Flash Lite 2.5 (سريع جداً)" if model_choice == "flash" else "Flash 2.5 (ذكي ومتوازن)"
         await update.message.reply_text(f"تم تبديل الموديل إلى: {label}")
     else:
         settings = get_settings(chat_id)
-        current = "Flash" if settings["model"] == "flash" else "Pro"
+        current = "Flash Lite 2.5" if settings["model"] == "flash" else "Flash 2.5"
         await update.message.reply_text(
             f"الموديل الحالي: {current}\n\n"
             "للتبديل استخدم:\n"
-            "/model flash - للردود السريعة\n"
-            "/model pro - للمهام المعقدة"
+            "/model flash - Flash Lite سريع جداً (1000 طلب/يوم)\n"
+            "/model pro - Flash 2.5 ذكي ومتوازن (250 طلب/يوم)"
         )
 
 
@@ -301,7 +301,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     settings = get_settings(chat_id)
-    model_label = "Pro" if settings["model"] == "pro" else "Flash"
+    model_label = "Flash 2.5" if settings["model"] == "pro" else "Flash Lite 2.5"
 
     stats_text = (
         f"إحصائيات المحادثة:\n\n"

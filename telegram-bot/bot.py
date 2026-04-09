@@ -24,29 +24,15 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_BASE_URL = os.environ.get("AI_INTEGRATIONS_GEMINI_BASE_URL", "")
-GEMINI_PROXY_KEY = os.environ.get("AI_INTEGRATIONS_GEMINI_API_KEY", "")
 
-MODEL_FLASH = "gemini-2.5-flash"
+MODEL_FLASH = "gemini-2.0-flash"
 MODEL_PRO = "gemini-2.5-pro"
 MAX_RETRIES = 4
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "conversations.db")
 
-if GEMINI_BASE_URL and GEMINI_PROXY_KEY:
-    client = genai.Client(
-        api_key=GEMINI_PROXY_KEY,
-        http_options=types.HttpOptions(base_url=GEMINI_BASE_URL),
-    )
-    logger.info("Using Replit AI Integrations proxy for Gemini")
-elif GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    logger.info("Using user's own Gemini API key")
-else:
-    client = None
-    logger.error("No Gemini API key configured!")
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 def init_db():
@@ -177,6 +163,8 @@ async def generate_with_retry(model_name: str, contents, config=None):
         except Exception as e:
             error_str = str(e)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
+                if "limit: 0" in error_str or "per_day" in error_str.lower() or "PerDay" in error_str:
+                    raise Exception("QUOTA_EXHAUSTED_DAILY")
                 wait_match = re.search(r"([\d.]+)\s*s", error_str)
                 wait_time = float(wait_match.group(1)) if wait_match else (15 * (attempt + 1))
                 wait_time = min(max(wait_time, 5), 60)
@@ -194,6 +182,21 @@ async def send_reply(update: Update, reply: str):
             await update.message.reply_text(reply[i : i + 4096])
     else:
         await update.message.reply_text(reply)
+
+
+def get_error_message(e: Exception) -> str:
+    error_str = str(e)
+    if "QUOTA_EXHAUSTED_DAILY" in error_str:
+        return (
+            "⚠️ نفدت الحصة اليومية المجانية لمفتاح Gemini API.\n"
+            "الحصة تتجدد تلقائياً كل يوم.\n"
+            "يمكنك المحاولة لاحقاً أو ترقية خطتك في Google AI Studio."
+        )
+    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+        return "⚠️ تم تجاوز حد الطلبات. انتظر دقيقة ثم حاول مرة أخرى."
+    if "API_KEY_INVALID" in error_str or "401" in error_str:
+        return "⚠️ مفتاح API غير صالح. تحقق من المفتاح في الإعدادات."
+    return "حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى."
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -333,7 +336,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Text handler error: {e}")
-        await update.message.reply_text("حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى.")
+        await update.message.reply_text(get_error_message(e))
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -364,7 +367,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Photo handler error: {e}")
-        await update.message.reply_text("حدث خطأ أثناء تحليل الصورة. حاول مرة أخرى.")
+        await update.message.reply_text(get_error_message(e))
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -401,7 +404,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Voice handler error: {e}")
-        await update.message.reply_text("حدث خطأ أثناء معالجة الرسالة الصوتية. حاول مرة أخرى.")
+        await update.message.reply_text(get_error_message(e))
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -467,7 +470,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Document handler error: {e}")
-        await update.message.reply_text("حدث خطأ أثناء معالجة الملف. حاول مرة أخرى.")
+        await update.message.reply_text(get_error_message(e))
 
 
 async def post_init(application: Application):
@@ -488,12 +491,13 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN is not set")
         return
     if client is None:
-        logger.error("No Gemini client configured")
+        logger.error("GEMINI_API_KEY is not set")
         return
 
     init_db()
     logger.info("Database initialized")
     logger.info(f"Models: Flash={MODEL_FLASH}, Pro={MODEL_PRO}")
+    logger.info("Using Google AI Studio API key directly")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 

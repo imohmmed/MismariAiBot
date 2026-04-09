@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import sqlite3
 import logging
 import asyncio
@@ -124,14 +125,50 @@ def is_supported_url(text: str) -> str | None:
     return None
 
 
+def _is_youtube(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
+
+def _base_ytdlp_args(url: str) -> list:
+    args = [YT_DLP_PATH, "--no-warnings", "--no-playlist"]
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        args.extend(["--cookies", COOKIES_FILE])
+    if _is_youtube(url):
+        args.extend([
+            "--extractor-args", "youtube:player_client=ios,web",
+            "--add-headers", "User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+        ])
+    return args
+
+
+def _classify_error(err_msg: str, platform: str) -> str:
+    lo = err_msg.lower()
+    if any(k in lo for k in ["sign in", "login required", "authentication required", "private video", "age-restricted", "/login/", "facebook.com/login", "requires authentication"]):
+        return f"هذا المقطع يحتاج تسجيل دخول على {platform}.\nارسل رابط الفيديو المباشر بدل رابط المشاركة." if "facebook" in platform.lower() else f"هذا المقطع يحتاج تسجيل دخول على {platform}."
+    if any(k in lo for k in ["not available", "unavailable", "has been removed", "no longer available", "removed", "does not exist"]):
+        return "المقطع محذوف أو غير متاح."
+    if "404" in lo:
+        return "الرابط غير موجود. تحقق من الرابط."
+    if any(k in lo for k in ["private", "members only"]):
+        return "المقطع خاص ولا يمكن تحميله."
+    if "50 ميغابايت" in err_msg:
+        return "حجم الملف أكبر من 50 ميغابايت."
+    if any(k in lo for k in ["timed out", "timeout"]):
+        return "انتهت المهلة، حاول مرة ثانية."
+    if any(k in lo for k in ["unsupported url"]):
+        if "login" in lo:
+            return f"هذا المقطع يحتاج تسجيل دخول على {platform}."
+        return "هذا الرابط غير مدعوم. جرب رابطاً مختلفاً."
+    if any(k in lo for k in ["format", "no video formats"]):
+        return "لم يتم العثور على صيغة مناسبة للتحميل."
+    return "تحقق من الرابط وحاول مرة ثانية."
+
+
 async def download_media(url: str, download_type: str = "video") -> dict:
     with tempfile.TemporaryDirectory() as tmpdir:
         output_template = os.path.join(tmpdir, "%(title).50s.%(ext)s")
 
-        args = [YT_DLP_PATH, "--no-warnings", "--no-playlist"]
-
-        if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-            args.extend(["--cookies", COOKIES_FILE])
+        args = _base_ytdlp_args(url)
 
         if download_type == "audio":
             args.extend(["-f", "bestaudio", "-x", "--audio-format", "mp3"])
@@ -145,9 +182,7 @@ async def download_media(url: str, download_type: str = "video") -> dict:
         args.extend(["-o", output_template, url])
 
         try:
-            info_args = [YT_DLP_PATH, "--dump-json", "--no-download", "--no-warnings", "--no-playlist"]
-            if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-                info_args.extend(["--cookies", COOKIES_FILE])
+            info_args = _base_ytdlp_args(url) + ["--dump-json", "--no-download"]
             info_args.append(url)
 
             info_proc = await asyncio.create_subprocess_exec(
@@ -156,7 +191,6 @@ async def download_media(url: str, download_type: str = "video") -> dict:
                 stderr=asyncio.subprocess.PIPE,
             )
             info_stdout, _ = await asyncio.wait_for(info_proc.communicate(), timeout=30)
-            import json
             info = json.loads(info_stdout.decode()) if info_stdout else {}
             title = info.get("title", "تحميل")
             thumbnail = info.get("thumbnail", None)
@@ -176,8 +210,8 @@ async def download_media(url: str, download_type: str = "video") -> dict:
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
 
         if proc.returncode != 0:
-            err_msg = stderr.decode()[:300] if stderr else "Unknown error"
-            raise Exception(f"فشل التحميل: {err_msg}")
+            err_msg = stderr.decode()[:500] if stderr else "Unknown error"
+            raise Exception(err_msg)
 
         files = []
         for f in os.listdir(tmpdir):
@@ -964,19 +998,9 @@ async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
 
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Download error: {error_msg}")
-        friendly = "فشل التحميل. "
-        if "login" in error_msg.lower() or "authentication" in error_msg.lower():
-            friendly += f"{platform} يحتاج تسجيل دخول."
-        elif "private" in error_msg.lower() or "unavailable" in error_msg.lower():
-            friendly += "المقطع خاص أو غير متاح."
-        elif "50 ميغابايت" in error_msg:
-            friendly += "حجم الملف أكبر من 50 ميغابايت."
-        elif "timed out" in error_msg.lower():
-            friendly += "انتهت المهلة، حاول مرة ثانية."
-        else:
-            friendly += "تحقق من الرابط وحاول مرة ثانية."
-        await status_msg.edit_text(f"❌ {friendly}")
+        logger.error(f"Download error ({platform}): {error_msg[:200]}")
+        detail = _classify_error(error_msg, platform)
+        await status_msg.edit_text(f"❌ فشل التحميل. {detail}")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):

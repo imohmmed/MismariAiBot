@@ -5,7 +5,10 @@ import logging
 import asyncio
 import re
 import hashlib
+import subprocess
+import tempfile
 from datetime import datetime
+from urllib.parse import urlparse
 
 from google import genai
 from google.genai import types
@@ -16,6 +19,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ConversationHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -73,6 +77,137 @@ COMPLEX_KEYWORDS = [
 ]
 
 AWAITING_SYSTEM_PROMPT = 1
+
+SUPPORTED_PLATFORMS = {
+    "youtube.com": "يوتيوب",
+    "youtu.be": "يوتيوب",
+    "instagram.com": "انستغرام",
+    "tiktok.com": "تيكتوك",
+    "spotify.com": "سبوتيفاي",
+    "soundcloud.com": "ساوندكلاود",
+    "deezer.com": "ديزر",
+    "facebook.com": "فيسبوك",
+    "fb.watch": "فيسبوك",
+    "twitter.com": "تويتر",
+    "x.com": "تويتر",
+    "pinterest.com": "بنترست",
+    "threads.net": "ثريدز",
+    "drive.google.com": "جوجل درايف",
+    "snapchat.com": "سنابشات",
+    "likee.video": "لايكي",
+    "kwai.com": "كواي",
+}
+
+YT_DLP_PATH = os.environ.get("YT_DLP_PATH", "yt-dlp")
+COOKIES_FILE = os.environ.get("COOKIES_FILE", "")
+MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
+
+
+def detect_platform(url: str) -> str | None:
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        host = host.lower().replace("www.", "").replace("m.", "")
+        for domain, name in SUPPORTED_PLATFORMS.items():
+            if domain in host:
+                return name
+    except Exception:
+        pass
+    return None
+
+
+def is_supported_url(text: str) -> str | None:
+    url_match = re.search(r'https?://\S+', text)
+    if url_match:
+        url = url_match.group(0)
+        if detect_platform(url):
+            return url
+    return None
+
+
+async def download_media(url: str, download_type: str = "video") -> dict:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_template = os.path.join(tmpdir, "%(title).50s.%(ext)s")
+
+        args = [YT_DLP_PATH, "--no-warnings", "--no-playlist"]
+
+        if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+            args.extend(["--cookies", COOKIES_FILE])
+
+        if download_type == "audio":
+            args.extend(["-f", "bestaudio", "-x", "--audio-format", "mp3"])
+            output_template = os.path.join(tmpdir, "%(title).50s.mp3")
+        else:
+            args.extend([
+                "-f", "bestvideo[vcodec^=avc1][filesize<50M]+bestaudio[ext=m4a]/best[filesize<50M]/best",
+                "--merge-output-format", "mp4",
+            ])
+
+        args.extend(["-o", output_template, url])
+
+        try:
+            info_args = [YT_DLP_PATH, "--dump-json", "--no-download", "--no-warnings", "--no-playlist"]
+            if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+                info_args.extend(["--cookies", COOKIES_FILE])
+            info_args.append(url)
+
+            info_proc = await asyncio.create_subprocess_exec(
+                *info_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            info_stdout, _ = await asyncio.wait_for(info_proc.communicate(), timeout=30)
+            import json
+            info = json.loads(info_stdout.decode()) if info_stdout else {}
+            title = info.get("title", "تحميل")
+            thumbnail = info.get("thumbnail", None)
+            duration = info.get("duration", None)
+            uploader = info.get("uploader", None)
+        except Exception:
+            title = "تحميل"
+            thumbnail = None
+            duration = None
+            uploader = None
+
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+
+        if proc.returncode != 0:
+            err_msg = stderr.decode()[:300] if stderr else "Unknown error"
+            raise Exception(f"فشل التحميل: {err_msg}")
+
+        files = []
+        for f in os.listdir(tmpdir):
+            filepath = os.path.join(tmpdir, f)
+            if os.path.isfile(filepath):
+                files.append(filepath)
+
+        if not files:
+            raise Exception("لم يتم العثور على ملف بعد التحميل")
+
+        filepath = files[0]
+        file_size = os.path.getsize(filepath)
+
+        if file_size > MAX_TELEGRAM_FILE_SIZE:
+            raise Exception("حجم الملف أكبر من 50 ميغابايت. تيليكرام ما يدعم ملفات بهالحجم.")
+
+        with open(filepath, "rb") as f:
+            file_bytes = f.read()
+
+        return {
+            "bytes": file_bytes,
+            "title": title,
+            "thumbnail": thumbnail,
+            "duration": duration,
+            "uploader": uploader,
+            "filename": os.path.basename(filepath),
+            "size": file_size,
+            "type": download_type,
+        }
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -535,19 +670,44 @@ def get_error_message(e: Exception) -> str:
     return "حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى."
 
 
+def get_user_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return context.user_data.get("mode", "")
+
+
+def set_user_mode(context: ContextTypes.DEFAULT_TYPE, mode: str):
+    context.user_data["mode"] = mode
+
+
+def get_main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📥 تحميل", callback_data="mode_download"),
+            InlineKeyboardButton("🤖 ذكاء اصطناعي", callback_data="mode_ai"),
+        ],
+    ])
+
+
+def get_download_type_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎬 فيديو", callback_data="dl_video"),
+            InlineKeyboardButton("🎵 صوت", callback_data="dl_audio"),
+        ],
+        [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
+    ])
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user(update.effective_user)
+    if not await check_subscription(update):
+        return
+    set_user_mode(context, "")
     welcome = (
         "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n\n"
         "شلون أكدر أساعدك اليوم؟\n\n"
-        "يمكنك:\n"
-        "• إرسال نصوص للدردشة 💬\n"
-        "• إرسال صور لتحليلها 📷\n"
-        "• إرسال رسائل صوتية 🎤\n"
-        "• إرسال ملفات للتحليل 📄\n\n"
-        "أكتب /help لعرض جميع الأوامر."
+        "اختر الخدمة اللي تريدها:"
     )
-    await update.message.reply_text(welcome)
+    await update.message.reply_text(welcome, reply_markup=get_main_menu_keyboard())
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -763,10 +923,177 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(stats_text)
 
 
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "mode_download":
+        set_user_mode(context, "download")
+        platforms = (
+            "📥 <b>وضع التحميل</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "المنصات المدعومة:\n"
+            "• يوتيوب 🎬\n"
+            "• انستغرام 📸\n"
+            "• تيكتوك 🎵\n"
+            "• سبوتيفاي 🎧\n"
+            "• ساوندكلاود 🎶\n"
+            "• ديزر 🎼\n"
+            "• فيسبوك 📘\n"
+            "• تويتر 🐦\n"
+            "• بنترست 📌\n"
+            "• ثريدز 🧵\n"
+            "• جوجل درايف 📁\n"
+            "• سنابشات 👻\n"
+            "• لايكي 🎭\n"
+            "• كواي 🎪\n\n"
+            "أرسل رابط المقطع وأختار نوع التحميل 👇"
+        )
+        await query.edit_message_text(platforms, parse_mode="HTML", reply_markup=get_download_type_keyboard())
+
+    elif data == "mode_ai":
+        set_user_mode(context, "ai")
+        ai_text = (
+            "🤖 <b>وضع الذكاء الاصطناعي</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "أكدر أساعدك بـ:\n"
+            "• دردشة ذكية مع ذاكرة محادثة 💬\n"
+            "• تحليل الصور والملفات 📷\n"
+            "• فهم الرسائل الصوتية 🎤\n"
+            "• كتابة أكواد وتحليلها 💻\n\n"
+            "أرسل أي رسالة وأنا أرد عليك!"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
+        ])
+        await query.edit_message_text(ai_text, parse_mode="HTML", reply_markup=keyboard)
+
+    elif data == "main_menu":
+        set_user_mode(context, "")
+        welcome = (
+            "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n\n"
+            "اختر الخدمة اللي تريدها:"
+        )
+        await query.edit_message_text(welcome, reply_markup=get_main_menu_keyboard())
+
+    elif data == "dl_video":
+        context.user_data["dl_type"] = "video"
+        await query.edit_message_text(
+            "🎬 تم اختيار تحميل <b>فيديو</b>\n\nأرسل الرابط الحين:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎵 تغيير لصوت", callback_data="dl_audio")],
+                [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
+            ]),
+        )
+
+    elif data == "dl_audio":
+        context.user_data["dl_type"] = "audio"
+        await query.edit_message_text(
+            "🎵 تم اختيار تحميل <b>صوت</b>\n\nأرسل الرابط الحين:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 تغيير لفيديو", callback_data="dl_video")],
+                [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
+            ]),
+        )
+
+
+async def handle_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = is_supported_url(update.message.text)
+    if not url:
+        platform_names = set(SUPPORTED_PLATFORMS.values())
+        await update.message.reply_text(
+            "⚠️ هذا الرابط غير مدعوم.\n\n"
+            "المنصات المدعومة:\n" +
+            "\n".join(f"• {name}" for name in sorted(platform_names)),
+        )
+        return
+
+    platform = detect_platform(url)
+    dl_type = context.user_data.get("dl_type", "video")
+    type_name = "فيديو 🎬" if dl_type == "video" else "صوت 🎵"
+
+    status_msg = await update.message.reply_text(
+        f"⏳ جاري تحميل {type_name} من {platform}...\nانتظر شوي...",
+    )
+
+    await update.message.chat.send_action("upload_video" if dl_type == "video" else "upload_audio")
+
+    try:
+        result = await download_media(url, dl_type)
+        file_bytes = io.BytesIO(result["bytes"])
+        file_bytes.name = result["filename"]
+
+        size_mb = result["size"] / (1024 * 1024)
+        caption = f"📥 {result['title']}"
+        if result.get("uploader"):
+            caption += f"\n👤 {result['uploader']}"
+        caption += f"\n📊 {size_mb:.1f} MB"
+        caption += f"\n🔗 {platform}"
+
+        if dl_type == "audio":
+            await update.message.reply_audio(
+                audio=file_bytes,
+                caption=caption,
+                title=result["title"],
+                duration=int(result["duration"]) if result.get("duration") else None,
+            )
+        else:
+            await update.message.reply_video(
+                video=file_bytes,
+                caption=caption,
+                duration=int(result["duration"]) if result.get("duration") else None,
+                supports_streaming=True,
+            )
+
+        await status_msg.delete()
+        logger.info(f"Download success: {platform} ({dl_type}) - {size_mb:.1f}MB")
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Download error: {error_msg}")
+        friendly = "فشل التحميل. "
+        if "login" in error_msg.lower() or "authentication" in error_msg.lower():
+            friendly += f"{platform} يحتاج تسجيل دخول."
+        elif "private" in error_msg.lower() or "unavailable" in error_msg.lower():
+            friendly += "المقطع خاص أو غير متاح."
+        elif "50 ميغابايت" in error_msg:
+            friendly += "حجم الملف أكبر من 50 ميغابايت."
+        elif "timed out" in error_msg.lower():
+            friendly += "انتهت المهلة، حاول مرة ثانية."
+        else:
+            friendly += "تحقق من الرابط وحاول مرة ثانية."
+        await status_msg.edit_text(f"❌ {friendly}")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user(update.effective_user)
     if not await check_subscription(update):
         return
+
+    mode = get_user_mode(context)
+
+    if mode == "download":
+        url = is_supported_url(update.message.text)
+        if url:
+            await handle_download(update, context)
+            return
+        else:
+            await update.message.reply_text(
+                "📥 أنت بوضع التحميل. أرسل رابط من المنصات المدعومة.\n"
+                "أو أرسل /start للرجوع للقائمة الرئيسية.",
+            )
+            return
+
+    if mode != "ai" and mode != "":
+        await update.message.reply_text(
+            "أرسل /start لاختيار الخدمة.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+
     chat_id = update.effective_chat.id
     user_text = update.message.text
     settings = get_settings(chat_id)
@@ -1021,6 +1348,7 @@ def main():
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(system_conv)
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

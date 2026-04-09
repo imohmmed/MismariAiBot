@@ -37,6 +37,8 @@ Located in `telegram-bot/` directory. A Python Telegram bot with persona "Mismar
 - **Forced channel subscription**: Configurable via REQUIRED_CHANNEL env var
 - **Admin dashboard**: /admin shows full stats (owner-only)
 - **User tracking**: SQLite users table tracks all users with activity data
+- **Media downloader**: Download from YouTube, Instagram, TikTok, Spotify, SoundCloud, Deezer, Facebook, Twitter, Pinterest, Threads, Google Drive, Snapchat, Likee, Kwai via yt-dlp
+- **Dual mode**: /start shows Download vs AI buttons; each mode has its own flow
 - **Commands**: /start, /help, /system, /clear, /stats, /admin
 
 ### Environment Variables

@@ -17,26 +17,36 @@ pnpm workspace monorepo using TypeScript + Python Telegram Bot. Each package man
 - **Build**: esbuild (CJS bundle)
 - **Python version**: 3.12
 - **Telegram Bot**: python-telegram-bot 22.7
-- **AI**: Google Gemini via Replit AI Integrations (google-genai)
+- **AI**: Google Gemini via user's own API key (google-genai SDK)
 
-## Telegram Bot
+## Telegram Bot ("Mismari" / مسماري)
 
-Located in `telegram-bot/` directory. A Python Telegram bot powered by Gemini AI with:
+Located in `telegram-bot/` directory. A Python Telegram bot with persona "Mismari" (مسماري), developed by @mohmmed.
 
-- **Dual model support**: gemini-2.5-flash (fast) and gemini-2.5-pro (deep thinking)
-- **Conversation memory**: SQLite database (`telegram-bot/conversations.db`)
-- **Image analysis**: Send photos for AI-powered analysis
-- **Voice processing**: Send voice messages for transcription and response
-- **Document analysis**: Send files/code for analysis
-- **System prompts**: Customizable bot personality per chat
-- **Commands**: /start, /help, /clear, /model, /system, /stats
+### Features
+
+- **Smart model routing**: AI automatically chooses gemini-2.5-flash-lite (simple) or gemini-2.5-flash (complex)
+- **Mismari persona**: Fixed system instruction with Iraqi-tech personality, never forgets identity
+- **Conversation memory**: SQLite with auto-summarization (prunes old messages, keeps summary)
+- **Context pruning**: Only sends last 10 messages + summary to save tokens
+- **Image compression**: Pillow resizes to 720p before sending to API
+- **Response caching**: Common identity questions cached in SQLite
+- **Token optimization**: Short max_tokens (1024) for simple queries, full (8192) for complex
+- **Image/voice/document analysis**: Full multimodal support
+- **Custom system prompts**: ConversationHandler flow for /system command
+- **Commands**: /start, /help, /system, /clear, /stats
 
 ### Environment Variables
 
 - `TELEGRAM_BOT_TOKEN` — Telegram bot API token
 - `OWNER_ID` — Telegram user ID of the bot owner
-- `AI_INTEGRATIONS_GEMINI_BASE_URL` — Gemini API proxy URL (auto-configured)
-- `AI_INTEGRATIONS_GEMINI_API_KEY` — Gemini API key (auto-configured)
+- `GEMINI_API_KEY` — User's own Google AI Studio API key
+
+### Model Routing Logic
+
+- Simple text (<300 chars, no complex keywords) → gemini-2.5-flash-lite (1000 RPD)
+- Complex text, code, analysis, long messages → gemini-2.5-flash (250 RPD)
+- Photos, voice, documents → always gemini-2.5-flash
 
 ## Key Commands
 

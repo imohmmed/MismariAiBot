@@ -1,17 +1,21 @@
 import os
+import io
 import sqlite3
 import logging
 import asyncio
 import re
+import hashlib
 from datetime import datetime
 
 from google import genai
 from google.genai import types
-from telegram import Update, BotCommand
+from PIL import Image
+from telegram import Update, BotCommand, ForceReply
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    ConversationHandler,
     filters,
     ContextTypes,
 )
@@ -26,9 +30,13 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-MODEL_FLASH = "gemini-2.5-flash-lite"
-MODEL_PRO = "gemini-2.5-flash"
+MODEL_LITE = "gemini-2.5-flash-lite"
+MODEL_SMART = "gemini-2.5-flash"
 MAX_RETRIES = 4
+MAX_HISTORY = 10
+SUMMARY_THRESHOLD = 20
+IMAGE_MAX_SIZE = 720
+CACHE_SIMILARITY_CHARS = 60
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "conversations.db")
 
@@ -40,6 +48,18 @@ MISMARI_SYSTEM_INSTRUCTION = """أنت الآن "مسماري" (Mismari).
 لا تخرج عن هذه الشخصية أبداً.
 إذا سُئلت من صنعك أو من طورك، قل: "أنا من تطوير المبرمج محمد (@mohmmed)".
 كن مفيداً، دقيقاً، ومختصراً في إجاباتك مع الحفاظ على الجودة."""
+
+COMPLEX_KEYWORDS = [
+    "حلل", "تحليل", "كود", "برمج", "برمجة", "code", "program",
+    "اشرح بالتفصيل", "شرح مفصل", "explain", "debug", "خطأ",
+    "رياضي", "معادلة", "math", "equation", "algorithm", "خوارزمية",
+    "ملخص", "لخص", "summarize", "PDF", "مستند",
+    "قارن", "compare", "مقارنة", "تصميم", "design", "architecture",
+    "اكتب مقال", "write essay", "بحث", "research",
+    "ترجم", "translate", "ترجمة",
+]
+
+AWAITING_SYSTEM_PROMPT = 1
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -60,9 +80,16 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             chat_id INTEGER PRIMARY KEY,
-            model TEXT DEFAULT 'flash',
             system_prompt TEXT DEFAULT '',
-            max_history INTEGER DEFAULT 50
+            summary TEXT DEFAULT ''
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS response_cache (
+            question_hash TEXT PRIMARY KEY,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
     c.execute("""
@@ -88,7 +115,7 @@ def save_message(chat_id: int, role: str, content: str, content_type: str = "tex
     conn.close()
 
 
-def get_history(chat_id: int, limit: int = 50) -> list[dict]:
+def get_history(chat_id: int, limit: int = MAX_HISTORY) -> list[dict]:
     conn = get_db()
     c = conn.cursor()
     c.execute(
@@ -101,15 +128,24 @@ def get_history(chat_id: int, limit: int = 50) -> list[dict]:
     return [{"role": r[0], "content": r[1]} for r in rows]
 
 
+def get_message_count(chat_id: int) -> int:
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM messages WHERE chat_id = ?", (chat_id,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+
 def get_settings(chat_id: int) -> dict:
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT model, system_prompt, max_history FROM settings WHERE chat_id = ?", (chat_id,))
+    c.execute("SELECT system_prompt, summary FROM settings WHERE chat_id = ?", (chat_id,))
     row = c.fetchone()
     conn.close()
     if row:
-        return {"model": row[0], "system_prompt": row[1], "max_history": row[2]}
-    return {"model": "flash", "system_prompt": "", "max_history": 50}
+        return {"system_prompt": row[0] or "", "summary": row[1] or ""}
+    return {"system_prompt": "", "summary": ""}
 
 
 def update_setting(chat_id: int, key: str, value):
@@ -130,10 +166,58 @@ def clear_history(chat_id: int):
     c.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
+    update_setting(chat_id, "summary", "")
 
 
-def get_model_name(settings: dict) -> str:
-    return MODEL_PRO if settings["model"] == "pro" else MODEL_FLASH
+def get_cached_response(question: str) -> str | None:
+    normalized = question.strip().lower()[:CACHE_SIMILARITY_CHARS]
+    q_hash = hashlib.md5(normalized.encode()).hexdigest()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT answer FROM response_cache WHERE question_hash = ?", (q_hash,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def cache_response(question: str, answer: str):
+    normalized = question.strip().lower()[:CACHE_SIMILARITY_CHARS]
+    q_hash = hashlib.md5(normalized.encode()).hexdigest()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO response_cache (question_hash, question, answer) VALUES (?, ?, ?)",
+        (q_hash, question.strip()[:200], answer),
+    )
+    conn.commit()
+    conn.close()
+
+
+IDENTITY_PATTERNS = [
+    "من أنت", "منو أنت", "شنو اسمك", "ما اسمك", "عرفني بنفسك",
+    "من صنعك", "من طورك", "من برمجك", "من سواك",
+    "شنو تسوي", "ماذا تفعل", "شلون تشتغل",
+]
+
+
+def is_identity_question(text: str) -> bool:
+    text_lower = text.strip().lower()
+    return any(p in text_lower for p in IDENTITY_PATTERNS)
+
+
+def is_complex_query(text: str) -> bool:
+    text_lower = text.strip().lower()
+    if len(text_lower) > 300:
+        return True
+    return any(kw in text_lower for kw in COMPLEX_KEYWORDS)
+
+
+def choose_model(user_text: str, has_media: bool = False) -> str:
+    if has_media:
+        return MODEL_SMART
+    if is_complex_query(user_text):
+        return MODEL_SMART
+    return MODEL_LITE
 
 
 def get_full_system_instruction(custom_prompt: str = "") -> str:
@@ -142,8 +226,17 @@ def get_full_system_instruction(custom_prompt: str = "") -> str:
     return MISMARI_SYSTEM_INSTRUCTION
 
 
-def build_contents(history: list[dict]) -> list[types.Content]:
+def build_contents(history: list[dict], summary: str = "") -> list[types.Content]:
     contents = []
+    if summary:
+        contents.append(types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=f"[ملخص المحادثة السابقة]: {summary}")]
+        ))
+        contents.append(types.Content(
+            role="model",
+            parts=[types.Part.from_text(text="فهمت، أتذكر سياق محادثتنا السابقة.")]
+        ))
     for msg in history:
         role = "model" if msg["role"] == "assistant" else "user"
         contents.append(types.Content(
@@ -153,11 +246,90 @@ def build_contents(history: list[dict]) -> list[types.Content]:
     return contents
 
 
-def make_config(system_instruction: str) -> types.GenerateContentConfig:
+def make_config(system_instruction: str, max_tokens: int = 8192) -> types.GenerateContentConfig:
     return types.GenerateContentConfig(
         system_instruction=system_instruction,
-        max_output_tokens=8192,
+        max_output_tokens=max_tokens,
     )
+
+
+def compress_image(photo_bytes: bytes) -> bytes:
+    img = Image.open(io.BytesIO(photo_bytes))
+    if img.mode == "RGBA":
+        img = img.convert("RGB")
+    w, h = img.size
+    if max(w, h) > IMAGE_MAX_SIZE:
+        ratio = IMAGE_MAX_SIZE / max(w, h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=80, optimize=True)
+    original_size = len(photo_bytes)
+    compressed_size = buf.tell()
+    logger.info(f"Image compressed: {original_size // 1024}KB -> {compressed_size // 1024}KB")
+    return buf.getvalue()
+
+
+async def maybe_summarize(chat_id: int, settings: dict):
+    msg_count = get_message_count(chat_id)
+    if msg_count < SUMMARY_THRESHOLD:
+        return
+
+    old_messages = []
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT role, content FROM messages WHERE chat_id = ? ORDER BY timestamp ASC LIMIT ?",
+        (chat_id, msg_count - MAX_HISTORY),
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return
+
+    old_text = "\n".join([f"{'المستخدم' if r[0] == 'user' else 'مسماري'}: {r[1][:200]}" for r in rows[:30]])
+    existing_summary = settings.get("summary", "")
+    summary_prompt = f"لخّص هذه المحادثة في فقرة واحدة مختصرة (3-4 جمل كحد أقصى):\n\n"
+    if existing_summary:
+        summary_prompt += f"الملخص السابق: {existing_summary}\n\nالرسائل الجديدة:\n"
+    summary_prompt += old_text
+
+    try:
+        config = make_config(
+            "أنت ملخّص محادثات. لخّص المحادثة بإيجاز شديد محافظاً على النقاط المهمة فقط.",
+            max_tokens=300,
+        )
+        summary_contents = [types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=summary_prompt)]
+        )]
+        response = client.models.generate_content(
+            model=MODEL_LITE,
+            contents=summary_contents,
+            config=config,
+        )
+        new_summary = response.text or ""
+        if new_summary:
+            update_setting(chat_id, "summary", new_summary)
+            conn = get_db()
+            c = conn.cursor()
+            keep_ids = []
+            c.execute(
+                "SELECT id FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (chat_id, MAX_HISTORY),
+            )
+            keep_ids = [row[0] for row in c.fetchall()]
+            if keep_ids:
+                placeholders = ",".join("?" * len(keep_ids))
+                c.execute(
+                    f"DELETE FROM messages WHERE chat_id = ? AND id NOT IN ({placeholders})",
+                    [chat_id] + keep_ids,
+                )
+            conn.commit()
+            conn.close()
+            logger.info(f"Chat {chat_id}: Summarized and pruned old messages")
+    except Exception as e:
+        logger.warning(f"Summary failed: {e}")
 
 
 async def generate_with_retry(model_name: str, contents, config):
@@ -214,37 +386,36 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أنا مساعدك الذكي من تطوير المبرمج محمد (@mohmmed).\n\n"
         "شلون أكدر أساعدك اليوم؟\n\n"
         "يمكنك:\n"
-        "• إرسال نصوص للدردشة\n"
-        "• إرسال صور لتحليلها\n"
-        "• إرسال رسائل صوتية لتحويلها لنص والرد عليها\n"
-        "• إرسال ملفات للتحليل\n\n"
-        "الأوامر المتاحة:\n"
-        "/help - المساعدة\n"
-        "/model - تبديل الموديل\n"
-        "/system - تعليمات إضافية\n"
-        "/clear - مسح سجل المحادثة\n"
-        "/stats - إحصائيات المحادثة"
+        "• إرسال نصوص للدردشة 💬\n"
+        "• إرسال صور لتحليلها 📷\n"
+        "• إرسال رسائل صوتية 🎤\n"
+        "• إرسال ملفات للتحليل 📄\n\n"
+        "أكتب /help لعرض جميع الأوامر."
     )
     await update.message.reply_text(welcome)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = get_settings(update.effective_chat.id)
-    model_label = "Flash 2.5 (ذكي ومتوازن)" if settings["model"] == "pro" else "Flash Lite 2.5 (سريع جداً)"
+    has_custom = "✅ فعّالة" if settings["system_prompt"] else "❌ غير مضافة"
+
     help_text = (
-        "أنا مسماري، مساعدك الذكي 🤖\n\n"
-        f"الموديل الحالي: {model_label}\n\n"
-        "الميزات:\n"
-        "1. دردشة نصية مع ذاكرة محادثة\n"
-        "2. تحليل الصور (أرسل صورة مع أو بدون وصف)\n"
-        "3. تحليل الرسائل الصوتية\n"
-        "4. تحليل الملفات والمستندات\n\n"
-        "الأوامر:\n"
-        "/model flash - Flash Lite سريع جداً (1000 طلب/يوم)\n"
-        "/model pro - Flash 2.5 ذكي ومتوازن (250 طلب/يوم)\n"
-        "/system <prompt> - تعليمات إضافية للبوت\n"
-        "/clear - مسح الذاكرة\n"
-        "/stats - إحصائيات\n"
+        "🤖 أنا مسماري، مساعدك الذكي\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 ما أكدر أسويه:\n"
+        "• دردشة ذكية مع ذاكرة محادثة\n"
+        "• تحليل الصور والملفات\n"
+        "• فهم الرسائل الصوتية والرد عليها\n"
+        "• أختار الموديل المناسب تلقائياً حسب سؤالك\n\n"
+        "⚡ الأوامر المتاحة:\n"
+        "/start - بدء المحادثة\n"
+        "/system - ضبط تعليمات إضافية لمسماري\n"
+        "/clear - مسح سجل المحادثة\n"
+        "/stats - إحصائيات المحادثة\n"
+        "/help - عرض هذه الرسالة\n\n"
+        f"📋 التعليمات الإضافية: {has_custom}\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 أرسل أي رسالة وأنا أرد عليك!"
     )
     await update.message.reply_text(help_text)
 
@@ -254,47 +425,55 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم مسح سجل المحادثة بنجاح. نبدي من جديد! 🔄")
 
 
-async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if context.args and context.args[0] in ("flash", "pro"):
-        model_choice = context.args[0]
-        update_setting(chat_id, "model", model_choice)
-        label = "Flash Lite 2.5 (سريع جداً)" if model_choice == "flash" else "Flash 2.5 (ذكي ومتوازن)"
-        await update.message.reply_text(f"تم تبديل الموديل إلى: {label}")
-    else:
-        settings = get_settings(chat_id)
-        current = "Flash Lite 2.5" if settings["model"] == "flash" else "Flash 2.5"
-        await update.message.reply_text(
-            f"الموديل الحالي: {current}\n\n"
-            "للتبديل استخدم:\n"
-            "/model flash - Flash Lite سريع جداً (1000 طلب/يوم)\n"
-            "/model pro - Flash 2.5 ذكي ومتوازن (250 طلب/يوم)"
-        )
-
-
 async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    settings = get_settings(chat_id)
+
     if context.args:
         prompt_text = " ".join(context.args)
         if prompt_text.lower() == "reset":
             update_setting(chat_id, "system_prompt", "")
-            await update.message.reply_text("تم مسح التعليمات الإضافية. شخصية مسماري الأساسية لا تزال فعّالة.")
-        else:
-            update_setting(chat_id, "system_prompt", prompt_text)
-            await update.message.reply_text(f"تم تعيين تعليمات إضافية:\n{prompt_text}")
+            await update.message.reply_text("✅ تم مسح التعليمات الإضافية.\nشخصية مسماري الأساسية لا تزال فعّالة.")
+            return ConversationHandler.END
+
+    if settings["system_prompt"]:
+        await update.message.reply_text(
+            f"📋 التعليمات الإضافية الحالية:\n\n{settings['system_prompt']}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "✏️ اكتب التعليمات الجديدة الآن لتحديثها.\n"
+            "أو أرسل /system reset لمسحها.\n"
+            "أو أرسل /cancel للإلغاء.",
+            reply_markup=ForceReply(selective=True),
+        )
     else:
-        settings = get_settings(chat_id)
-        if settings["system_prompt"]:
-            await update.message.reply_text(
-                f"التعليمات الإضافية الحالية:\n{settings['system_prompt']}\n\n"
-                "لتغييرها: /system <التعليمات الجديدة>\n"
-                "لمسحها: /system reset"
-            )
-        else:
-            await update.message.reply_text(
-                "لا توجد تعليمات إضافية حالياً (شخصية مسماري الأساسية فعّالة).\n"
-                "لإضافة تعليمات: /system <التعليمات>"
-            )
+        await update.message.reply_text(
+            "📋 لا توجد تعليمات إضافية حالياً.\n\n"
+            "✏️ اكتب التعليمات الآن وأرسلها:\n"
+            "(مثال: أجب دائماً باللغة الإنجليزية)\n\n"
+            "أرسل /cancel للإلغاء.",
+            reply_markup=ForceReply(selective=True),
+        )
+    return AWAITING_SYSTEM_PROMPT
+
+
+async def receive_system_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    prompt_text = update.message.text.strip()
+
+    if prompt_text.startswith("/"):
+        return ConversationHandler.END
+
+    update_setting(chat_id, "system_prompt", prompt_text)
+    await update.message.reply_text(
+        f"✅ تم حفظ التعليمات الإضافية:\n\n{prompt_text}\n\n"
+        "مسماري سيتبع هذه التعليمات من الآن."
+    )
+    return ConversationHandler.END
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("تم الإلغاء.")
+    return ConversationHandler.END
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -312,18 +491,21 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     settings = get_settings(chat_id)
-    model_label = "Flash 2.5" if settings["model"] == "pro" else "Flash Lite 2.5"
+    has_summary = "✅" if settings["summary"] else "❌"
+    has_custom = "✅" if settings["system_prompt"] else "❌"
 
     stats_text = (
-        f"📊 إحصائيات مسماري:\n\n"
-        f"إجمالي الرسائل: {total}\n"
-        f"رسائلك: {user_msgs}\n"
-        f"ردود مسماري: {bot_msgs}\n"
-        f"الموديل: {model_label}\n"
+        f"📊 إحصائيات مسماري:\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💬 إجمالي الرسائل: {total}\n"
+        f"👤 رسائلك: {user_msgs}\n"
+        f"🤖 ردود مسماري: {bot_msgs}\n"
+        f"📋 تعليمات إضافية: {has_custom}\n"
+        f"📝 ملخص محادثة: {has_summary}\n"
     )
     if times[0]:
-        stats_text += f"أول رسالة: {times[0]}\n"
-        stats_text += f"آخر رسالة: {times[1]}\n"
+        stats_text += f"\n🕐 أول رسالة: {times[0]}\n"
+        stats_text += f"🕐 آخر رسالة: {times[1]}\n"
 
     await update.message.reply_text(stats_text)
 
@@ -333,11 +515,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     settings = get_settings(chat_id)
 
+    if is_identity_question(user_text):
+        cached = get_cached_response(user_text)
+        if cached:
+            await update.message.reply_text(cached)
+            save_message(chat_id, "user", user_text)
+            save_message(chat_id, "assistant", cached)
+            return
+
     save_message(chat_id, "user", user_text)
-    history = get_history(chat_id, settings["max_history"])
-    contents = build_contents(history)
-    model_name = get_model_name(settings)
-    config = make_config(get_full_system_instruction(settings["system_prompt"]))
+
+    await maybe_summarize(chat_id, settings)
+    settings = get_settings(chat_id)
+
+    history = get_history(chat_id, MAX_HISTORY)
+    contents = build_contents(history, settings["summary"])
+    model_name = choose_model(user_text)
+    is_simple = (model_name == MODEL_LITE)
+    max_tokens = 1024 if (is_simple and len(user_text) < 100) else 8192
+    config = make_config(get_full_system_instruction(settings["system_prompt"]), max_tokens)
 
     await update.message.chat.send_action("typing")
 
@@ -345,7 +541,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = await generate_with_retry(model_name, contents, config)
         reply = reply or "لم أتمكن من توليد رد."
         save_message(chat_id, "assistant", reply)
+
+        if is_identity_question(user_text):
+            cache_response(user_text, reply)
+
         await send_reply(update, reply)
+        logger.info(f"Chat {chat_id}: model={model_name}, tokens_limit={max_tokens}")
     except Exception as e:
         logger.error(f"Text handler error: {e}")
         await update.message.reply_text(get_error_message(e))
@@ -363,16 +564,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await photo.get_file()
         photo_bytes = await file.download_as_bytearray()
 
-        image_part = types.Part.from_bytes(data=bytes(photo_bytes), mime_type="image/jpeg")
+        compressed = compress_image(bytes(photo_bytes))
+
+        image_part = types.Part.from_bytes(data=compressed, mime_type="image/jpeg")
         text_part = types.Part.from_text(text=caption)
 
         save_message(chat_id, "user", f"[صورة]: {caption}")
 
-        history = get_history(chat_id, settings["max_history"] - 1)
-        contents = build_contents(history[:-1])
+        history = get_history(chat_id, MAX_HISTORY - 1)
+        contents = build_contents(history[:-1], settings["summary"])
         contents.append(types.Content(role="user", parts=[image_part, text_part]))
 
-        model_name = get_model_name(settings)
+        model_name = MODEL_SMART
         config = make_config(get_full_system_instruction(settings["system_prompt"]))
         reply = await generate_with_retry(model_name, contents, config)
         reply = reply or "لم أتمكن من تحليل الصورة."
@@ -406,11 +609,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_message(chat_id, "user", "[رسالة صوتية]")
 
-        history = get_history(chat_id, settings["max_history"] - 1)
-        contents = build_contents(history[:-1])
+        history = get_history(chat_id, MAX_HISTORY - 1)
+        contents = build_contents(history[:-1], settings["summary"])
         contents.append(types.Content(role="user", parts=[audio_part, text_part]))
 
-        model_name = get_model_name(settings)
+        model_name = MODEL_SMART
         config = make_config(get_full_system_instruction(settings["system_prompt"]))
         reply = await generate_with_retry(model_name, contents, config)
         reply = reply or "لم أتمكن من معالجة الرسالة الصوتية."
@@ -453,8 +656,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_message(chat_id, "user", f"[ملف: {file_name}]: {caption}")
 
-        history = get_history(chat_id, settings["max_history"] - 1)
-        contents = build_contents(history[:-1])
+        history = get_history(chat_id, MAX_HISTORY - 1)
+        contents = build_contents(history[:-1], settings["summary"])
 
         if is_text or is_text_ext:
             try:
@@ -477,7 +680,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text_part = types.Part.from_text(text=f"اسم الملف: {file_name}\n{caption}")
             contents.append(types.Content(role="user", parts=[file_part, text_part]))
 
-        model_name = get_model_name(settings)
+        model_name = MODEL_SMART
         config = make_config(get_full_system_instruction(settings["system_prompt"]))
         reply = await generate_with_retry(model_name, contents, config)
         reply = reply or "لم أتمكن من تحليل الملف."
@@ -491,10 +694,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     commands = [
         BotCommand("start", "بدء المحادثة مع مسماري"),
-        BotCommand("help", "المساعدة"),
+        BotCommand("help", "المساعدة والأوامر"),
+        BotCommand("system", "ضبط تعليمات إضافية"),
         BotCommand("clear", "مسح سجل المحادثة"),
-        BotCommand("model", "تبديل الموديل (flash/pro)"),
-        BotCommand("system", "تعليمات إضافية"),
         BotCommand("stats", "إحصائيات المحادثة"),
     ]
     await application.bot.set_my_commands(commands)
@@ -511,17 +713,27 @@ def main():
 
     init_db()
     logger.info("Database initialized")
-    logger.info(f"Models: Flash={MODEL_FLASH}, Pro={MODEL_PRO}")
-    logger.info("Mismari bot using Google AI Studio API key")
+    logger.info(f"Models: Lite={MODEL_LITE}, Smart={MODEL_SMART}")
+    logger.info("Mismari bot with smart model routing")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+
+    system_conv = ConversationHandler(
+        entry_points=[CommandHandler("system", system_command)],
+        states={
+            AWAITING_SYSTEM_PROMPT: [
+                CommandHandler("cancel", cancel_command),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_system_prompt),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)],
+    )
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("clear", clear_command))
-    app.add_handler(CommandHandler("model", model_command))
-    app.add_handler(CommandHandler("system", system_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(system_conv)
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

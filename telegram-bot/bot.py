@@ -902,7 +902,6 @@ async def post_init(application: Application):
         BotCommand("system", "ضبط تعليمات إضافية"),
         BotCommand("clear", "مسح سجل المحادثة"),
         BotCommand("stats", "إحصائيات المحادثة"),
-        BotCommand("admin", "لوحة تحكم المالك"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Bot commands registered successfully")

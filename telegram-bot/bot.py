@@ -4,6 +4,8 @@ import logging
 import json
 import base64
 import io
+import asyncio
+import re
 from datetime import datetime
 
 from telegram import Update, BotCommand
@@ -25,18 +27,41 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-GEMINI_BASE_URL = os.environ.get("AI_INTEGRATIONS_GEMINI_BASE_URL", "")
-GEMINI_API_KEY = os.environ.get("AI_INTEGRATIONS_GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-MODEL_FLASH = "gemini-2.5-flash"
+MODEL_FLASH = "gemini-2.0-flash"
 MODEL_PRO = "gemini-2.5-pro"
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "conversations.db")
 
-client = genai.Client(
-    api_key=GEMINI_API_KEY,
-    http_options=types.HttpOptions(base_url=GEMINI_BASE_URL),
-)
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+MAX_RETRIES = 3
+
+
+async def generate_with_retry(model_name, contents, config=None):
+    if config is None:
+        config = types.GenerateContentConfig(max_output_tokens=8192)
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+            return response
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                wait_match = re.search(r"retry in ([\d.]+)s", error_str, re.IGNORECASE)
+                wait_time = float(wait_match.group(1)) if wait_match else (15 * (attempt + 1))
+                wait_time = min(wait_time, 60)
+                logger.warning(f"Rate limited, waiting {wait_time}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                await asyncio.sleep(wait_time)
+            else:
+                raise
+    raise Exception("Max retries exceeded for Gemini API")
 
 
 def init_db():
@@ -136,18 +161,18 @@ def build_contents(history: list[dict], system_prompt: str = "") -> list[types.C
     if system_prompt:
         contents.append(types.Content(
             role="user",
-            parts=[types.Part.from_text(f"[System Instructions]: {system_prompt}")]
+            parts=[types.Part.from_text(text=f"[System Instructions]: {system_prompt}")]
         ))
         contents.append(types.Content(
             role="model",
-            parts=[types.Part.from_text("Understood. I will follow these instructions.")]
+            parts=[types.Part.from_text(text="Understood. I will follow these instructions.")]
         ))
 
     for msg in history:
         role = "model" if msg["role"] == "assistant" else "user"
         contents.append(types.Content(
             role=role,
-            parts=[types.Part.from_text(msg["content"])]
+            parts=[types.Part.from_text(text=msg["content"])]
         ))
     return contents
 
@@ -289,13 +314,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action("typing")
 
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                max_output_tokens=8192,
-            ),
-        )
+        response = await generate_with_retry(model_name, contents)
 
         reply = response.text or "لم أتمكن من توليد رد."
         save_message(chat_id, "assistant", reply)
@@ -337,18 +356,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         contents.append(types.Content(
             role="user",
-            parts=[image_part, types.Part.from_text(caption)]
+            parts=[image_part, types.Part.from_text(text=caption)]
         ))
 
         model_name = get_model_name(settings)
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                max_output_tokens=8192,
-            ),
-        )
+        response = await generate_with_retry(model_name, contents)
 
         reply = response.text or "لم أتمكن من تحليل الصورة."
         save_message(chat_id, "assistant", reply)
@@ -396,7 +409,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts=[
                 audio_part,
                 types.Part.from_text(
-                    "استمع لهذه الرسالة الصوتية، حوّلها لنص، ثم أجب على محتواها. "
+                    text="استمع لهذه الرسالة الصوتية، حوّلها لنص، ثم أجب على محتواها. "
                     "اكتب أولاً ما قاله المستخدم ثم ردك."
                 ),
             ],
@@ -404,13 +417,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         model_name = get_model_name(settings)
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                max_output_tokens=8192,
-            ),
-        )
+        response = await generate_with_retry(model_name, contents)
 
         reply = response.text or "لم أتمكن من معالجة الرسالة الصوتية."
         save_message(chat_id, "assistant", reply)
@@ -468,7 +475,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 contents.append(types.Content(
                     role="user",
                     parts=[types.Part.from_text(
-                        f"اسم الملف: {file_name}\n"
+                        text=f"اسم الملف: {file_name}\n"
                         f"نوع الملف: {mime_type}\n\n"
                         f"محتوى الملف:\n```\n{file_content[:50000]}\n```\n\n{caption}"
                     )]
@@ -481,7 +488,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     role="user",
                     parts=[
                         types.Part.from_bytes(data=bytes(doc_bytes), mime_type=mime_type),
-                        types.Part.from_text(f"اسم الملف: {file_name}\n{caption}"),
+                        types.Part.from_text(text=f"اسم الملف: {file_name}\n{caption}"),
                     ]
                 ))
         else:
@@ -492,19 +499,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 role="user",
                 parts=[
                     types.Part.from_bytes(data=bytes(doc_bytes), mime_type=mime_type),
-                    types.Part.from_text(f"اسم الملف: {file_name}\n{caption}"),
+                    types.Part.from_text(text=f"اسم الملف: {file_name}\n{caption}"),
                 ]
             ))
 
         model_name = get_model_name(settings)
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                max_output_tokens=8192,
-            ),
-        )
+        response = await generate_with_retry(model_name, contents)
 
         reply = response.text or "لم أتمكن من تحليل الملف."
         save_message(chat_id, "assistant", reply)

@@ -373,32 +373,41 @@ def track_user(user):
     conn.close()
 
 
-async def check_subscription(update: Update) -> bool:
+async def check_subscription(update: Update, from_callback: bool = False) -> bool:
     if not REQUIRED_CHANNEL:
         return True
     if update.effective_user and update.effective_user.id == OWNER_ID:
         return True
     try:
         channel = REQUIRED_CHANNEL if REQUIRED_CHANNEL.startswith("@") else f"@{REQUIRED_CHANNEL}"
-        member = await update.get_bot().get_chat_member(
+        bot = update.get_bot()
+        member = await bot.get_chat_member(
             chat_id=channel,
             user_id=update.effective_user.id,
         )
+        logger.info(f"Subscription check for {update.effective_user.id}: status={member.status}")
         if member.status in ("member", "administrator", "creator"):
             return True
     except Exception as e:
-        logger.warning(f"Subscription check failed: {e}")
-        return True
+        logger.error(f"Subscription check error: {e}")
+        pass
 
     channel_name = REQUIRED_CHANNEL.lstrip('@')
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 اشترك بالقناة", url=f"https://t.me/{channel_name}")],
+        [InlineKeyboardButton("✅ تحققت، اشتركت", callback_data="check_sub")],
     ])
-    await update.message.reply_text(
+    sub_text = (
         "⚠️ يجب عليك الاشتراك في القناة أولاً للاستخدام.\n\n"
-        "بعد الاشتراك، أرسل رسالتك مرة ثانية.",
-        reply_markup=keyboard,
+        "بعد الاشتراك، اضغط الزر بالأسفل للتحقق."
     )
+
+    if from_callback and update.callback_query:
+        await update.callback_query.edit_message_text(sub_text, reply_markup=keyboard)
+    elif update.message:
+        await update.message.reply_text(sub_text, reply_markup=keyboard)
+    elif update.callback_query:
+        await update.callback_query.answer("⚠️ اشترك بالقناة أولاً!", show_alert=True)
     return False
 
 
@@ -925,8 +934,24 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
+
+    if data == "check_sub":
+        await query.answer()
+        is_subscribed = await check_subscription(update, from_callback=True)
+        if is_subscribed:
+            set_user_mode(context, "")
+            welcome = (
+                "✅ تم التحقق! أهلاً بك في مسماري 🤖\n\n"
+                "اختر الخدمة اللي تريدها:"
+            )
+            await query.edit_message_text(welcome, reply_markup=get_main_menu_keyboard())
+        return
+
+    await query.answer()
+
+    if not await check_subscription(update, from_callback=True):
+        return
 
     if data == "mode_download":
         set_user_mode(context, "download")

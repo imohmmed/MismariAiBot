@@ -10,7 +10,7 @@ from datetime import datetime
 from google import genai
 from google.genai import types
 from PIL import Image
-from telegram import Update, BotCommand, ForceReply
+from telegram import Update, BotCommand, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -58,6 +58,7 @@ MISMARI_SYSTEM_INSTRUCTION = """أنت الآن "مسماري" (Mismari).
 - لبلوكات الكود متعددة الأسطر: <pre>الكود هنا</pre>
 - لا تستخدم ** أو ``` أبداً.
 - لا تستخدم # للعناوين.
+- لا تستخدم <br> أبداً. استخدم سطر فارغ جديد بدلاً منه.
 - استخدم الأسطر الفارغة للفصل بين الفقرات."""
 
 COMPLEX_KEYWORDS = [
@@ -253,11 +254,14 @@ async def check_subscription(update: Update) -> bool:
         logger.warning(f"Subscription check failed: {e}")
         return True
 
-    channel_link = f"https://t.me/{REQUIRED_CHANNEL.lstrip('@')}"
+    channel_name = REQUIRED_CHANNEL.lstrip('@')
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 اشترك بالقناة", url=f"https://t.me/{channel_name}")],
+    ])
     await update.message.reply_text(
-        f"⚠️ يجب عليك الاشتراك في القناة أولاً للاستخدام:\n\n"
-        f"👉 {channel_link}\n\n"
-        f"بعد الاشتراك، أرسل رسالتك مرة ثانية.",
+        "⚠️ يجب عليك الاشتراك في القناة أولاً للاستخدام.\n\n"
+        "بعد الاشتراك، أرسل رسالتك مرة ثانية.",
+        reply_markup=keyboard,
     )
     return False
 
@@ -427,6 +431,7 @@ async def generate_with_retry(model_name: str, contents, config):
 
 
 def sanitize_html(text: str) -> str:
+    text = re.sub(r'<br\s*/?>', '\n', text)
     text = re.sub(r'```(\w*)\n?(.*?)```', lambda m: f'<pre>{m.group(2)}</pre>', text, flags=re.DOTALL)
     text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
@@ -477,7 +482,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user(update.effective_user)
     welcome = (
         "أهلاً بك! أنا مسماري.. رفيقك في عالم التقنية والخدمات الرقمية 🤖\n\n"
-        "أنا مساعدك الذكي من تطوير المبرمج محمد (@mohmmed).\n\n"
         "شلون أكدر أساعدك اليوم؟\n\n"
         "يمكنك:\n"
         "• إرسال نصوص للدردشة 💬\n"
@@ -496,7 +500,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 أنا مسماري، مساعدك الذكي\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📌 ما أكدر أسويه:\n"
+        "📌 قادر على فعل:\n"
         "• دردشة ذكية مع ذاكرة محادثة\n"
         "• تحليل الصور والملفات\n"
         "• فهم الرسائل الصوتية والرد عليها\n"

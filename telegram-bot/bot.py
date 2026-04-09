@@ -26,7 +26,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-MODEL_FLASH = "gemini-2.0-flash"
+MODEL_FLASH = "gemini-2.5-flash"
 MODEL_PRO = "gemini-2.5-pro"
 MAX_RETRIES = 4
 

@@ -388,10 +388,17 @@ async def maybe_summarize(chat_id: int, settings: dict):
             role="user",
             parts=[types.Part.from_text(text=summary_prompt)]
         )]
-        response = client.models.generate_content(
-            model=MODEL_LITE,
-            contents=summary_contents,
-            config=config,
+        loop = asyncio.get_event_loop()
+        response = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=MODEL_LITE,
+                    contents=summary_contents,
+                    config=config,
+                ),
+            ),
+            timeout=30,
         )
         new_summary = response.text or ""
         if new_summary:
@@ -425,18 +432,33 @@ def get_fallback_model(current_model: str) -> str | None:
     return None
 
 
+GEMINI_TIMEOUT = 60
+
+
 async def generate_with_retry(model_name: str, contents, config):
     current_model = model_name
     tried_fallback = False
+    loop = asyncio.get_event_loop()
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = client.models.generate_content(
-                model=current_model,
-                contents=contents,
-                config=config,
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda m=current_model: client.models.generate_content(
+                        model=m,
+                        contents=contents,
+                        config=config,
+                    ),
+                ),
+                timeout=GEMINI_TIMEOUT,
             )
             return response.text or ""
+        except asyncio.TimeoutError:
+            logger.warning(f"Gemini timeout after {GEMINI_TIMEOUT}s on {current_model} (attempt {attempt + 1}/{MAX_RETRIES})")
+            if attempt + 1 >= MAX_RETRIES:
+                raise Exception("انتهت مهلة الاستجابة من الذكاء الاصطناعي. حاول مرة أخرى.")
+            continue
         except Exception as e:
             error_str = str(e)
             if "503" in error_str or "UNAVAILABLE" in error_str:

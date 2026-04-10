@@ -1,4 +1,4 @@
-# Workspace
+# MoHmmeD
 
 ## Overview
 
@@ -37,8 +37,8 @@ Located in `telegram-bot/` directory. A Python Telegram bot with persona "Mismar
 - **Forced channel subscription**: Configurable via REQUIRED_CHANNEL env var
 - **Admin dashboard**: /admin shows full stats (owner-only)
 - **User tracking**: SQLite users table tracks all users with activity data
-- **Media downloader**: Download from YouTube, Instagram, TikTok, Spotify, SoundCloud, Deezer, Facebook, Twitter, Pinterest, Threads, Google Drive, Snapchat, Likee, Kwai via yt-dlp
-- **Dual mode**: /start shows Download vs AI buttons; each mode has its own flow
+- **File size limit**: 20MB max for photos, audio, and documents
+- **Async Gemini calls**: Uses client.aio (native async) with Semaphore(5) to prevent freezing
 - **Commands**: /start, /help, /system, /clear, /stats, /admin
 
 ### Environment Variables
@@ -54,6 +54,14 @@ Located in `telegram-bot/` directory. A Python Telegram bot with persona "Mismar
 - Complex text, code, analysis, long messages → gemini-2.5-flash (250 RPD)
 - Photos, voice, documents → always gemini-2.5-flash
 
+### VPS Deployment
+
+- **IP**: 5.189.174.9
+- **Path**: /var/www/AiBot/bot.py
+- **Service**: mismari-bot (systemd)
+- **Upload**: `sshpass -p 'Xx719unnbvb1' scp -o StrictHostKeyChecking=no telegram-bot/bot.py root@5.189.174.9:/var/www/AiBot/bot.py`
+- **Restart**: `systemctl restart mismari-bot`
+
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages
@@ -62,5 +70,3 @@ Located in `telegram-bot/` directory. A Python Telegram bot with persona "Mismar
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - `pnpm --filter @workspace/api-server run dev` — run API server locally
 - `cd telegram-bot && python bot.py` — run Telegram bot
-
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.

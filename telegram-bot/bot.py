@@ -388,15 +388,11 @@ async def maybe_summarize(chat_id: int, settings: dict):
             role="user",
             parts=[types.Part.from_text(text=summary_prompt)]
         )]
-        loop = asyncio.get_event_loop()
         response = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=MODEL_LITE,
-                    contents=summary_contents,
-                    config=config,
-                ),
+            client.aio.models.generate_content(
+                model=MODEL_LITE,
+                contents=summary_contents,
+                config=config,
             ),
             timeout=30,
         )
@@ -432,38 +428,48 @@ def get_fallback_model(current_model: str) -> str | None:
     return None
 
 
-GEMINI_TIMEOUT = 60
+GEMINI_TIMEOUT = 55
+_gemini_semaphore = asyncio.Semaphore(5)
 
 
 async def generate_with_retry(model_name: str, contents, config):
     current_model = model_name
     tried_fallback = False
-    loop = asyncio.get_event_loop()
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda m=current_model: client.models.generate_content(
-                        model=m,
+            async with _gemini_semaphore:
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=current_model,
                         contents=contents,
                         config=config,
                     ),
-                ),
-                timeout=GEMINI_TIMEOUT,
-            )
+                    timeout=GEMINI_TIMEOUT,
+                )
             return response.text or ""
         except asyncio.TimeoutError:
             logger.warning(f"Gemini timeout after {GEMINI_TIMEOUT}s on {current_model} (attempt {attempt + 1}/{MAX_RETRIES})")
-            if attempt + 1 >= MAX_RETRIES:
-                raise Exception("انتهت مهلة الاستجابة من الذكاء الاصطناعي. حاول مرة أخرى.")
-            continue
+            if not tried_fallback:
+                fallback = get_fallback_model(current_model)
+                if fallback:
+                    logger.warning(f"Timeout on {current_model}, switching to {fallback}")
+                    current_model = fallback
+                    tried_fallback = True
+                    continue
+            raise Exception("انتهت مهلة الاستجابة من الذكاء الاصطناعي. حاول مرة أخرى.")
         except Exception as e:
             error_str = str(e)
             if "503" in error_str or "UNAVAILABLE" in error_str:
-                wait_time = 10 * (attempt + 1)
-                logger.warning(f"Service unavailable, retrying in {wait_time}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                if not tried_fallback:
+                    fallback = get_fallback_model(current_model)
+                    if fallback:
+                        logger.warning(f"503 on {current_model}, switching to {fallback}")
+                        current_model = fallback
+                        tried_fallback = True
+                        continue
+                wait_time = min(5 * (attempt + 1), 15)
+                logger.warning(f"Service unavailable on both models, waiting {wait_time}s")
                 await asyncio.sleep(wait_time)
             elif "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
                 is_daily_limit = "limit: 0" in error_str or "per_day" in error_str.lower() or "PerDay" in error_str
@@ -478,7 +484,7 @@ async def generate_with_retry(model_name: str, contents, config):
                     raise Exception("QUOTA_EXHAUSTED_ALL")
                 wait_match = re.search(r"([\d.]+)\s*s", error_str)
                 wait_time = float(wait_match.group(1)) if wait_match else (15 * (attempt + 1))
-                wait_time = min(max(wait_time, 5), 60)
+                wait_time = min(max(wait_time, 5), 30)
                 logger.warning(f"Rate limited on {current_model}, waiting {wait_time:.0f}s (attempt {attempt + 1}/{MAX_RETRIES})")
                 await asyncio.sleep(wait_time)
             else:

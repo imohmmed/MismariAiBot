@@ -861,6 +861,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(get_error_message(e))
 
 
+MAX_FILE_SIZE_MB = 20
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user(update.effective_user)
     if not await check_subscription(update):
@@ -873,6 +877,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         photo = update.message.photo[-1]
+        if photo.file_size and photo.file_size > MAX_FILE_SIZE_BYTES:
+            await update.message.reply_text(f"❌ حجم الصورة كبير جداً. الحد الأقصى {MAX_FILE_SIZE_MB}MB.")
+            return
         file = await photo.get_file()
         photo_bytes = await file.download_as_bytearray()
 
@@ -909,6 +916,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         voice = update.message.voice or update.message.audio
+        if voice.file_size and voice.file_size > MAX_FILE_SIZE_BYTES:
+            await update.message.reply_text(f"❌ حجم الملف الصوتي كبير جداً. الحد الأقصى {MAX_FILE_SIZE_MB}MB.")
+            return
         file = await voice.get_file()
         voice_bytes = await file.download_as_bytearray()
 
@@ -951,6 +961,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         doc = update.message.document
+        if doc.file_size and doc.file_size > MAX_FILE_SIZE_BYTES:
+            await update.message.reply_text(f"❌ حجم الملف كبير جداً. الحد الأقصى {MAX_FILE_SIZE_MB}MB.")
+            return
         file = await doc.get_file()
         doc_bytes = await file.download_as_bytearray()
 
